@@ -14,12 +14,17 @@ resizeCanvas();
 canvas.focus();
 
 // ─── Game State ────────────────────────────────────────────────────────────────
-let world = [], players = {}, myId = null;
+let world = [], players = {}, droppedItems = [], mobs = [], myId = null;
 let WORLD_WIDTH = 0, WORLD_HEIGHT = 0, BLOCK_SIZE = 32, MAX_HP = 20, MAX_BUILD_RANGE = 4;
 const camera = { x: 0, y: 0 };
 let myHp = MAX_HP;
 let canFly = false, noclip = false;
 let isAdmin = false;
+let myInventory = {};
+
+// Time & Day/Night Cycle State (120s cycle)
+let currentGameTime = 0; // 0..120
+let isNightTime = false;
 
 // ─── Physics Constants ─────────────────────────────────────────────────────────
 const GRAVITY = 0.55;
@@ -35,8 +40,8 @@ const keys = { w:false,a:false,s:false,d:false,ArrowUp:false,ArrowLeft:false,Arr
 const mobileKeys = { left:false, right:false, jump:false };
 
 // Hotbar & Inventory State
-let hotbar = [1, 2, 3, 4, 10]; // Default blocks in slots 1-5
-let activeSlotIndex = 0; // 0 to 4
+let hotbar = [1, 2, 3, 4, 101]; // Default slots 1-5
+let activeSlotIndex = 0;
 let selectedBlockId = hotbar[0];
 let isMouseDown = false;
 let mouseButton = -1;
@@ -44,14 +49,25 @@ let lastBreakTime = 0;
 
 // Inventory Categories
 const INV_DATA = {
-    'blocks': [1, 2, 3, 4, 5, 6, 8],
+    'blocks': [1, 2, 3, 4, 5, 6, 8, 12, 13],
     'bg': [9, 10],
-    'deadly': [7, 11]
+    'deadly': [7, 11],
+    'weapons': [101, 102]
 };
+
 const BLOCK_NAMES = {
     1:'Dirt', 2:'Grass', 3:'Stone', 4:'Wood Log', 5:'Leaves', 6:'Glass', 
-    7:'Lava', 8:'Ice', 9:'Wall', 10:'Door', 11:'Spike'
+    7:'Lava', 8:'Ice', 9:'Wood Wall (BG)', 10:'Wooden Door', 11:'Spike',
+    12:'Solid Wood Wall', 13:'Solid Stone Wall', 101:'Wooden Sword (3 DMG)', 102:'Stone Sword (5 DMG)'
 };
+
+const RECIPES_LIST = [
+    { id: 'solid_wood_wall', name: 'Solid Wood Wall (1x)', req: '2x Wood', resultId: 12 },
+    { id: 'solid_stone_wall', name: 'Solid Stone Wall (1x)', req: '2x Stone', resultId: 13 },
+    { id: 'wooden_door', name: 'Wooden Door (1x)', req: '4x Wood', resultId: 10 },
+    { id: 'wooden_sword', name: 'Wooden Sword (3 DMG)', req: '3x Wood', resultId: 101 },
+    { id: 'stone_sword', name: 'Stone Sword (5 DMG)', req: '2x Wood + 2x Stone', resultId: 102 }
+];
 
 // ─── Animation State ───────────────────────────────────────────────────────────
 let playerVelocityX = 0, playerVelocityY = 0;
@@ -60,7 +76,7 @@ let onIce = false;
 let actionAnim = ''; 
 let actionAnimTimer = 0;
 
-// ─── Stars (More dense and beautiful) ─────────────────────────────────────────
+// ─── Celestial Bodies & Environment ───────────────────────────────────────────
 const stars = [];
 for (let i = 0; i < 400; i++) {
     stars.push({ 
@@ -72,12 +88,11 @@ for (let i = 0; i < 400; i++) {
     });
 }
 
-// ─── Moon ─────────────────────────────────────────────────────────────────────
 const moon = { x: 3200, y: 120, r: 40 };
+const sun  = { x: 800,  y: 100, r: 45 };
 
-// ─── Clouds ───────────────────────────────────────────────────────────────────
 const clouds = [];
-for (let i = 0; i < 18; i++) {
+for (let i = 0; i < 20; i++) {
     clouds.push({ x: Math.random() * 4000, y: 30 + Math.random() * 300, speed: 0.06 + Math.random() * 0.15, size: 20 + Math.random() * 45 });
 }
 
@@ -100,10 +115,10 @@ function spawnParticles(gx, gy, color) {
 const BLOCK_PARTICLE_COLORS = {
     1:'#8B4513', 2:'#4a8c3f', 3:'#6b7280', 4:'#5c3a21',
     5:'#22863a', 6:'rgba(147,197,253,0.8)', 7:'#ff4500', 8:'#bae6fd',
-    9:'#3f3f4e', 10:'#8a5a32', 11:'#a0a0a0'
+    9:'#3f3f4e', 10:'#8a5a32', 11:'#a0a0a0', 12:'#5c3a21', 13:'#5a5a5a'
 };
 
-// ─── Procedural Block Renderer ────────────────────────────────────────────────
+// ─── Procedural Block & Item Renderer ──────────────────────────────────────────
 function drawBlock(ctx, blockId, sx, sy, bs, time) {
     if (!blockId) return;
     const t = time || 0;
@@ -112,42 +127,35 @@ function drawBlock(ctx, blockId, sx, sy, bs, time) {
 
     switch(blockId) {
         case 1: // Dirt
-            ctx.fillStyle = '#6b3a2a';
-            ctx.fillRect(0, 0, bs, bs);
+            ctx.fillStyle = '#6b3a2a'; ctx.fillRect(0, 0, bs, bs);
             ctx.fillStyle = '#4e2a18';
-            ctx.fillRect(4, 6, 5, 4); ctx.fillRect(16, 14, 4, 3);
-            ctx.fillRect(7, 22, 6, 3); ctx.fillRect(22, 5, 4, 4);
+            ctx.fillRect(4, 6, 5, 4); ctx.fillRect(16, 14, 4, 3); ctx.fillRect(7, 22, 6, 3);
             ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.strokeRect(0, 0, bs, bs);
             break;
         case 2: // Grass
             ctx.fillStyle = '#6b3a2a'; ctx.fillRect(0, 8, bs, bs - 8);
-            ctx.fillStyle = '#4e2a18'; ctx.fillRect(4, 14, 4, 3); ctx.fillRect(18, 20, 5, 3);
+            ctx.fillStyle = '#4e2a18'; ctx.fillRect(4, 14, 4, 3);
             ctx.fillStyle = '#3a7d35'; ctx.fillRect(0, 0, bs, 10);
             ctx.fillStyle = '#4a9e41'; for(let gx=1; gx<bs; gx+=5) ctx.fillRect(gx, 0, 2, 6);
-            ctx.fillStyle = '#5cbf52'; for(let gx=3; gx<bs; gx+=7) ctx.fillRect(gx, 0, 1, 4);
             ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.strokeRect(0, 0, bs, bs);
             break;
         case 3: // Stone
             ctx.fillStyle = '#5a5a5a'; ctx.fillRect(0, 0, bs, bs);
             const cracks = [[1,1,14,14],[16,2,13,13],[1,16,10,13],[12,16,18,13]];
             ctx.fillStyle = '#4a4a4a'; for(const [cx,cy,cw,ch] of cracks) ctx.fillRect(cx,cy,cw,ch);
-            ctx.fillStyle = '#666'; for(const [cx,cy,cw,ch] of cracks) ctx.fillRect(cx+1,cy+1,cw-2,ch-2);
             ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.strokeRect(0, 0, bs, bs);
             break;
-        case 4: // Wood Log (New)
+        case 4: // Wood Log
             ctx.fillStyle = '#5c3a21'; ctx.fillRect(0, 0, bs, bs);
-            ctx.fillStyle = '#3d2413'; 
-            ctx.fillRect(0, 2, bs, 3); ctx.fillRect(0, 10, bs, 2);
-            ctx.fillRect(0, 18, bs, 3); ctx.fillRect(0, 26, bs, 2);
-            ctx.fillStyle = '#7a4d2e'; 
-            ctx.fillRect(0, 5, bs, 2); ctx.fillRect(0, 21, bs, 2);
+            ctx.fillStyle = '#3d2413'; ctx.fillRect(0, 2, bs, 3); ctx.fillRect(0, 18, bs, 3);
+            ctx.fillStyle = '#7a4d2e'; ctx.fillRect(0, 7, bs, 2); ctx.fillRect(0, 23, bs, 2);
             ctx.strokeStyle = '#2b180b'; ctx.strokeRect(0, 0, bs, bs);
             break;
         case 5: // Leaves
             ctx.fillStyle = '#1a5e20'; ctx.fillRect(0, 0, bs, bs);
-            const leafPos = [[4,3],[12,2],[20,5],[2,14],[10,12],[18,14],[6,22],[16,21],[24,10]];
+            const leafPos = [[4,3],[12,2],[20,5],[2,14],[10,12],[18,14],[6,22],[16,21]];
             for (const [lx, ly] of leafPos) {
-                ctx.fillStyle = `hsl(${120 + Math.sin(lx*ly)*15}, 55%, ${30 + (lx%4)*4}%)`;
+                ctx.fillStyle = `hsl(${120 + Math.sin(lx*ly)*15}, 55%, 35%)`;
                 ctx.beginPath(); ctx.ellipse(lx, ly, 5, 4, lx/10, 0, Math.PI*2); ctx.fill();
             }
             ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.strokeRect(0, 0, bs, bs);
@@ -161,72 +169,74 @@ function drawBlock(ctx, blockId, sx, sy, bs, time) {
             const lavaPhase = (t / 400) % (Math.PI * 2);
             const lavaGrd = ctx.createLinearGradient(0, 0, 0, bs);
             lavaGrd.addColorStop(0, `hsl(${20 + Math.sin(lavaPhase)*10}, 100%, 55%)`);
-            lavaGrd.addColorStop(0.5, '#c0392b');
             lavaGrd.addColorStop(1, '#7b1818');
             ctx.fillStyle = lavaGrd; ctx.fillRect(0, 0, bs, bs);
-            ctx.fillStyle = `rgba(255, 160, 20, ${0.5 + 0.4 * Math.sin(lavaPhase * 2)})`;
-            ctx.beginPath(); ctx.arc(8, 20 + 4*Math.sin(lavaPhase), 4, 0, Math.PI*2); ctx.fill();
-            ctx.beginPath(); ctx.arc(22, 14 + 4*Math.sin(lavaPhase + 1), 3, 0, Math.PI*2); ctx.fill();
             ctx.strokeStyle = 'rgba(200,60,0,0.5)'; ctx.strokeRect(0, 0, bs, bs);
             break;
         case 8: // Ice
             const iceGrd = ctx.createLinearGradient(0, 0, bs, bs);
             iceGrd.addColorStop(0, '#e0f7ff'); iceGrd.addColorStop(1, '#7dd3fc');
             ctx.fillStyle = iceGrd; ctx.fillRect(0, 0, bs, bs);
-            ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.moveTo(bs/2, 2); ctx.lineTo(bs/2, bs-2); ctx.moveTo(2, bs/2); ctx.lineTo(bs-2, bs/2);
-            ctx.moveTo(5, 5); ctx.lineTo(bs-5, bs-5); ctx.moveTo(bs-5, 5); ctx.lineTo(5, bs-5); ctx.stroke();
-            ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.fillRect(2, 2, 10, 6);
             ctx.strokeStyle = 'rgba(135,206,250,0.8)'; ctx.strokeRect(0, 0, bs, bs);
             break;
-        case 9: // Wall (Background Brick)
+        case 9: // Background Wall
             ctx.fillStyle = '#3f3f4e'; ctx.fillRect(0, 0, bs, bs);
-            ctx.fillStyle = '#2f2f3a';
-            ctx.fillRect(0, 7, bs, 2); ctx.fillRect(0, 15, bs, 2); ctx.fillRect(0, 23, bs, 2);
-            ctx.fillRect(15, 0, 2, 7); ctx.fillRect(7, 7, 2, 8); ctx.fillRect(23, 7, 2, 8);
-            ctx.fillRect(15, 15, 2, 8); ctx.fillRect(7, 23, 2, 9);
-            // Shade to look like background
+            ctx.fillStyle = '#2f2f3a'; ctx.fillRect(0, 7, bs, 2); ctx.fillRect(0, 15, bs, 2);
             ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(0, 0, bs, bs);
             break;
-        case 10: // Door (Background Wood)
+        case 10: // Door
             ctx.fillStyle = '#8a5a32'; ctx.fillRect(0, 0, bs, bs);
-            ctx.strokeStyle = '#52341b'; ctx.lineWidth = 2;
-            ctx.strokeRect(2, 2, bs-4, bs-4);
-            ctx.strokeRect(6, 6, bs-12, bs/2 - 8);
-            ctx.strokeRect(6, bs/2 + 2, bs-12, bs/2 - 8);
-            ctx.fillStyle = '#eab308'; // doorknob
-            ctx.beginPath(); ctx.arc(bs - 6, bs/2, 2.5, 0, Math.PI*2); ctx.fill();
-            ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.fillRect(0, 0, bs, bs);
+            ctx.strokeStyle = '#52341b'; ctx.lineWidth = 2; ctx.strokeRect(2, 2, bs-4, bs-4);
+            ctx.fillStyle = '#eab308'; ctx.beginPath(); ctx.arc(bs - 6, bs/2, 2.5, 0, Math.PI*2); ctx.fill();
             break;
         case 11: // Spike
-            ctx.fillStyle = '#transparent'; ctx.fillRect(0, 0, bs, bs);
-            ctx.fillStyle = '#888'; // base
-            ctx.fillRect(0, bs - 4, bs, 4);
-            ctx.fillStyle = '#d4d4d8'; // spikes
+            ctx.fillStyle = '#888'; ctx.fillRect(0, bs - 4, bs, 4);
+            ctx.fillStyle = '#d4d4d8';
             ctx.beginPath();
             for(let i=0; i<3; i++) {
                 const px = i * (bs/3);
-                ctx.moveTo(px, bs - 4);
-                ctx.lineTo(px + (bs/6), bs - 16);
-                ctx.lineTo(px + (bs/3), bs - 4);
+                ctx.moveTo(px, bs - 4); ctx.lineTo(px + (bs/6), bs - 16); ctx.lineTo(px + (bs/3), bs - 4);
             }
-            ctx.fill();
-            ctx.strokeStyle = '#52525b'; ctx.stroke();
+            ctx.fill(); ctx.strokeStyle = '#52525b'; ctx.stroke();
+            break;
+        case 12: // Solid Wood Wall
+            ctx.fillStyle = '#7a4d2e'; ctx.fillRect(0, 0, bs, bs);
+            ctx.fillStyle = '#4a2d16'; ctx.fillRect(0, 0, bs, 3); ctx.fillRect(0, bs-3, bs, 3);
+            ctx.fillRect(0, 0, 3, bs); ctx.fillRect(bs-3, 0, 3, bs);
+            ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(bs,bs); ctx.moveTo(bs,0); ctx.lineTo(0,bs);
+            ctx.strokeStyle = '#3d230e'; ctx.lineWidth = 2; ctx.stroke();
+            break;
+        case 13: // Solid Stone Wall
+            ctx.fillStyle = '#4b5563'; ctx.fillRect(0, 0, bs, bs);
+            ctx.fillStyle = '#1f2937'; ctx.fillRect(0, 10, bs, 3); ctx.fillRect(0, 21, bs, 3);
+            ctx.fillRect(15, 0, 3, 10); ctx.fillRect(8, 10, 3, 11); ctx.fillRect(24, 10, 3, 11);
+            ctx.strokeStyle = '#111827'; ctx.strokeRect(0, 0, bs, bs);
+            break;
+        case 101: // Wooden Sword
+            ctx.fillStyle = '#8B4513'; ctx.fillRect(bs*0.4, bs*0.2, bs*0.2, bs*0.5);
+            ctx.fillStyle = '#d97706'; ctx.fillRect(bs*0.25, bs*0.7, bs*0.5, bs*0.1);
+            ctx.fillStyle = '#451a03'; ctx.fillRect(bs*0.4, bs*0.8, bs*0.2, bs*0.15);
+            break;
+        case 102: // Stone Sword
+            ctx.fillStyle = '#9ca3af'; ctx.fillRect(bs*0.4, bs*0.15, bs*0.2, bs*0.55);
+            ctx.fillStyle = '#4b5563'; ctx.fillRect(bs*0.25, bs*0.7, bs*0.5, bs*0.1);
+            ctx.fillStyle = '#1f2937'; ctx.fillRect(bs*0.4, bs*0.8, bs*0.2, bs*0.15);
             break;
     }
     ctx.restore();
 }
 
-// Generate Icons for UI dynamically
+// Generate Icons for UI
 const uiIcons = {};
 function generateIcons() {
     const iconCanvas = document.createElement('canvas');
     iconCanvas.width = 32; iconCanvas.height = 32;
     const ictx = iconCanvas.getContext('2d');
-    for (let i = 1; i <= 11; i++) {
+    const allIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,101,102];
+    for (let id of allIds) {
         ictx.clearRect(0, 0, 32, 32);
-        drawBlock(ictx, i, 0, 0, 32, 0);
-        uiIcons[i] = iconCanvas.toDataURL();
+        drawBlock(ictx, id, 0, 0, 32, 0);
+        uiIcons[id] = iconCanvas.toDataURL();
     }
 }
 generateIcons();
@@ -236,12 +246,14 @@ function renderHotbar() {
     const container = document.getElementById('hotbar');
     container.innerHTML = '';
     hotbar.forEach((blockId, index) => {
+        const qty = myInventory[blockId] || 0;
         const div = document.createElement('div');
         div.className = `block-select ${index === activeSlotIndex ? 'active' : ''}`;
         div.innerHTML = `
             <div class="slot-num">${index + 1}</div>
-            <span class="block-icon" style="background-image: url('${uiIcons[blockId]}')"></span>
-            ${BLOCK_NAMES[blockId]}
+            <span class="block-icon" style="background-image: url('${uiIcons[blockId] || ''}')"></span>
+            ${qty > 0 ? `<div class="item-qty">${qty}</div>` : ''}
+            ${BLOCK_NAMES[blockId] ? BLOCK_NAMES[blockId].split(' ')[0] : 'Item'}
         `;
         div.onclick = () => {
             activeSlotIndex = index;
@@ -251,31 +263,54 @@ function renderHotbar() {
         container.appendChild(div);
     });
 }
-renderHotbar();
 
 function renderInventoryTab(tabName) {
     const content = document.getElementById('invContent');
     content.innerHTML = '';
-    INV_DATA[tabName].forEach(blockId => {
-        const div = document.createElement('div');
-        div.className = 'block-select';
-        div.style.width = '60px';
-        div.style.height = '60px';
-        div.innerHTML = `
-            <span class="block-icon" style="background-image: url('${uiIcons[blockId]}'); width: 32px; height: 32px;"></span>
-            <div style="font-size: 0.5rem; margin-top: 4px;">${BLOCK_NAMES[blockId]}</div>
-        `;
-        div.onclick = () => {
-            hotbar[activeSlotIndex] = blockId;
-            selectedBlockId = blockId;
-            renderHotbar();
-            showAction(`Assigned ${BLOCK_NAMES[blockId]} to slot ${activeSlotIndex + 1}`, 1500);
-        };
-        content.appendChild(div);
-    });
+
+    if (tabName === 'crafting') {
+        RECIPES_LIST.forEach(rec => {
+            const card = document.createElement('div');
+            card.className = 'craft-card';
+            card.innerHTML = `
+                <div class="craft-info">
+                    <span class="block-icon" style="background-image: url('${uiIcons[rec.resultId]}'); width: 36px; height: 36px;"></span>
+                    <div class="craft-details">
+                        <div class="craft-title">${rec.name}</div>
+                        <div class="craft-req">Requires: ${rec.req}</div>
+                    </div>
+                </div>
+                <button class="craft-btn" data-id="${rec.id}">Craft</button>
+            `;
+            card.querySelector('.craft-btn').onclick = () => {
+                socket.emit('craft_item', rec.id);
+            };
+            content.appendChild(card);
+        });
+    } else {
+        (INV_DATA[tabName] || []).forEach(blockId => {
+            const qty = myInventory[blockId] || 0;
+            const div = document.createElement('div');
+            div.className = 'block-select';
+            div.style.width = '64px';
+            div.style.height = '64px';
+            div.innerHTML = `
+                <span class="block-icon" style="background-image: url('${uiIcons[blockId]}'); width: 32px; height: 32px;"></span>
+                ${qty > 0 ? `<div class="item-qty">${qty}</div>` : ''}
+                <div style="font-size: 0.5rem; margin-top: 4px;">${BLOCK_NAMES[blockId] || 'Item'}</div>
+            `;
+            div.onclick = () => {
+                hotbar[activeSlotIndex] = blockId;
+                selectedBlockId = blockId;
+                renderHotbar();
+                showAction(`Assigned ${BLOCK_NAMES[blockId]} to slot ${activeSlotIndex + 1}`, 1500);
+            };
+            content.appendChild(div);
+        });
+    }
 }
 
-// Inventory overlay toggles
+// Overlay Toggle
 const invOverlay = document.getElementById('inventoryOverlay');
 document.getElementById('openInvBtn').onclick = () => invOverlay.classList.remove('hidden');
 document.getElementById('closeInvBtn').onclick = () => invOverlay.classList.add('hidden');
@@ -283,9 +318,14 @@ window.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'e' && document.activeElement !== document.getElementById('chatInput')) {
         invOverlay.classList.toggle('hidden');
     }
+    if (e.key.toLowerCase() === 'g' && document.activeElement !== document.getElementById('chatInput')) {
+        if (selectedBlockId) {
+            socket.emit('drop_item', { itemType: selectedBlockId });
+        }
+    }
 });
 
-// Tab listeners
+// Tab Listeners
 document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.onclick = () => {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -293,9 +333,8 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
         renderInventoryTab(btn.getAttribute('data-tab'));
     };
 });
-renderInventoryTab('blocks');
 
-// ─── Character Renderer ───────────────────────────────────────────────────────
+// ─── Character Renderer ────────────────────────────────────────────────────────
 const SKIN = '#f5cba7', SHIRT = '#3b82f6', PANTS = '#1e3a5f', SHOE = '#2d1b00', HAIR = '#3b1f00', EYE = '#1a1a2e';
 
 function drawCharacter(ctx, bs, vx, vy, onGround, actionAnim, actionTimer, isMine) {
@@ -321,7 +360,7 @@ function drawCharacter(ctx, bs, vx, vy, onGround, actionAnim, actionTimer, isMin
     const bob = isWalking ? Math.abs(Math.sin(walkCycle)) * 1.5 : 0;
     const yBase = bs * 0.1 + bob;
 
-    // Default drawing faces RIGHT.
+    // DEFAULT DRAWING FACES RIGHT (+x)
     // BACK ARM
     ctx.save(); ctx.translate(half, yBase + hd + bh * 0.3); ctx.rotate(-armSwing);
     ctx.fillStyle = SHIRT; ctx.fillRect(-lw * 0.5 - bw / 2 - 1, 0, lw, ll);
@@ -344,13 +383,18 @@ function drawCharacter(ctx, bs, vx, vy, onGround, actionAnim, actionTimer, isMin
     // HEAD (Facing Right)
     ctx.fillStyle = SKIN; ctx.fillRect(half - hd / 2, yBase, hd, hd);
     ctx.fillStyle = HAIR; ctx.fillRect(half - hd / 2, yBase, hd, hd * 0.3);
-    ctx.fillStyle = EYE; ctx.fillRect(half + hd * 0.15, yBase + hd * 0.35, hd * 0.12, hd * 0.14); // eye on right
-    ctx.fillStyle = '#c0392b'; ctx.fillRect(half + hd * 0.15, yBase + hd * 0.65, hd * 0.2, hd * 0.06); // mouth on right
+    ctx.fillStyle = EYE; ctx.fillRect(half + hd * 0.15, yBase + hd * 0.35, hd * 0.12, hd * 0.14);
+    ctx.fillStyle = '#c0392b'; ctx.fillRect(half + hd * 0.15, yBase + hd * 0.65, hd * 0.2, hd * 0.06);
 
-    // FRONT ARM
+    // FRONT ARM / WEAPON HELD
     ctx.save(); ctx.translate(half, yBase + hd + bh * 0.3); ctx.rotate(armSwing);
     ctx.fillStyle = SHIRT; ctx.fillRect(bw / 2 + 1, 0, lw, ll);
-    ctx.fillStyle = SKIN; ctx.fillRect(bw / 2 + 1, ll - 1, lw, lw * 1.2); ctx.restore();
+    ctx.fillStyle = SKIN; ctx.fillRect(bw / 2 + 1, ll - 1, lw, lw * 1.2);
+
+    if (selectedBlockId === 101 || selectedBlockId === 102) {
+        drawBlock(ctx, selectedBlockId, bw / 2 + 4, ll - 8, 16, 0);
+    }
+    ctx.restore();
 
     ctx.restore();
 
@@ -359,6 +403,35 @@ function drawCharacter(ctx, bs, vx, vy, onGround, actionAnim, actionTimer, isMin
         ctx.lineWidth = 1;
         ctx.strokeRect(half - bs * 0.3, bs * 0.08, bs * 0.6, bs * 0.85);
     }
+}
+
+// ─── Knight Mob Renderer ───────────────────────────────────────────────────────
+function drawKnightMob(ctx, mob, camera) {
+    const sx = mob.x - camera.x;
+    const sy = mob.y - camera.y;
+    const bs = BLOCK_SIZE;
+
+    ctx.save();
+    ctx.translate(sx + bs / 2, sy + bs / 2);
+    if (!mob.facingRight) ctx.scale(-1, 1);
+    ctx.translate(-bs / 2, -bs / 2);
+
+    ctx.fillStyle = '#475569'; ctx.fillRect(6, 12, 20, 14);
+    ctx.fillStyle = '#1e293b'; ctx.fillRect(8, 26, 16, 6);
+    ctx.fillStyle = '#64748b'; ctx.fillRect(6, 2, 20, 10);
+    ctx.fillStyle = '#ef4444'; ctx.fillRect(10, -3, 12, 5);
+    ctx.fillStyle = '#dc2626'; ctx.fillRect(18, 5, 6, 3);
+    ctx.fillStyle = '#94a3b8'; ctx.fillRect(2, 14, 6, 10);
+    ctx.fillStyle = '#e2e8f0'; ctx.fillRect(24, 6, 4, 16);
+    ctx.fillStyle = '#b45309'; ctx.fillRect(23, 20, 6, 3);
+
+    ctx.restore();
+
+    const hpRatio = Math.max(0, mob.hp / mob.maxHp);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(sx, sy - 8, bs, 4);
+    ctx.fillStyle = hpRatio > 0.5 ? '#22c55e' : '#ef4444';
+    ctx.fillRect(sx, sy - 8, bs * hpRatio, 4);
 }
 
 // ─── HP HUD ───────────────────────────────────────────────────────────────────
@@ -378,20 +451,54 @@ socket.on('init', (data) => {
     myId = data.id;
     world = data.world;
     players = data.players;
+    droppedItems = data.droppedItems || [];
+    mobs = data.mobs || [];
     WORLD_WIDTH = data.WORLD_WIDTH;
     WORLD_HEIGHT = data.WORLD_HEIGHT;
     BLOCK_SIZE = data.BLOCK_SIZE;
     MAX_HP = data.MAX_HP;
     MAX_BUILD_RANGE = data.MAX_BUILD_RANGE;
     myHp = MAX_HP;
+    myInventory = data.inventory || {};
+    currentGameTime = data.gameTime || 0;
+    isNightTime = data.isNight || false;
     resizeCanvas();
     renderHpHud(myHp);
+    renderHotbar();
+    renderInventoryTab('blocks');
     requestAnimationFrame(gameLoop);
 });
 
 socket.on('player_joined', p => { players[p.id] = p; });
 socket.on('player_left', id => { delete players[id]; });
 socket.on('player_moved', p => { if (players[p.id]) Object.assign(players[p.id], p); });
+
+socket.on('time_sync', data => {
+    currentGameTime = data.gameTime;
+    isNightTime = data.isNight;
+    
+    // Update Time Widget UI
+    const widget = document.getElementById('timeWidget');
+    if (widget) {
+        const remSecs = isNightTime ? (120 - currentGameTime) : (60 - currentGameTime);
+        const mm = String(Math.floor(remSecs / 60)).padStart(2, '0');
+        const ss = String(remSecs % 60).padStart(2, '0');
+        if (isNightTime) {
+            widget.textContent = `🌙 Night (${mm}:${ss})`;
+            widget.style.color = '#a78bfa';
+        } else {
+            widget.textContent = `🌞 Day (${mm}:${ss})`;
+            widget.style.color = '#fcd34d';
+        }
+    }
+});
+
+socket.on('inventory_update', inv => {
+    myInventory = inv;
+    renderHotbar();
+    const activeTab = document.querySelector('.tab-btn.active')?.getAttribute('data-tab') || 'blocks';
+    renderInventoryTab(activeTab);
+});
 
 socket.on('world_update', (data) => {
     const old = world[data.gridY][data.gridX];
@@ -401,13 +508,28 @@ socket.on('world_update', (data) => {
     }
 });
 
+socket.on('item_spawned', item => { droppedItems.push(item); });
+socket.on('item_picked_up', data => {
+    droppedItems = droppedItems.filter(i => i.id !== data.itemId);
+});
+
+socket.on('mobs_update', updatedMobs => { mobs = updatedMobs; });
+socket.on('mob_spawned', mob => { mobs.push(mob); });
+socket.on('mob_damaged', data => {
+    const m = mobs.find(x => x.id === data.mobId);
+    if (m) m.hp = data.hp;
+});
+socket.on('mob_died', data => {
+    mobs = mobs.filter(m => m.id !== data.mobId);
+    showAction('💥 Knight Defeated!', 1500);
+});
+
 socket.on('hp_update', (hp) => { myHp = hp; renderHpHud(hp); });
 
 socket.on('player_died', (id) => {
     if (players[id]) {
         players[id].isDead = true;
         players[id].deathTime = Date.now();
-        players[id].deathY = players[id].y;
     }
 });
 
@@ -468,20 +590,25 @@ function handleMouseAction(e) {
     const rect = canvas.getBoundingClientRect();
     const worldX = (e.clientX - rect.left) * (canvas.width / rect.width) + camera.x;
     const worldY = (e.clientY - rect.top) * (canvas.height / rect.height) + camera.y;
+
+    if (mouseButton === 0) {
+        for (let mob of mobs) {
+            if (Math.hypot(worldX - (mob.x + 16), worldY - (mob.y + 16)) < 36) {
+                socket.emit('attack_mob', { mobId: mob.id, weaponId: selectedBlockId });
+                actionAnim = 'break'; actionAnimTimer = 10;
+                return;
+            }
+        }
+    }
+
     const gridX = Math.floor(worldX / BLOCK_SIZE);
     const gridY = Math.floor(worldY / BLOCK_SIZE);
 
-    // Range Check locally
-    const px = p.x / BLOCK_SIZE;
-    const py = p.y / BLOCK_SIZE;
-    const dist = Math.sqrt(Math.pow(px - gridX, 2) + Math.pow(py - gridY, 2));
-    if (!isAdmin && dist > MAX_BUILD_RANGE) {
-        // Just ignore it, or show a subtle error
-        return;
-    }
+    const px = p.x / BLOCK_SIZE, py = p.y / BLOCK_SIZE;
+    if (!isAdmin && Math.hypot(px - gridX, py - gridY) > MAX_BUILD_RANGE) return;
 
     const now = Date.now();
-    if (now - lastBreakTime < 120) return; 
+    if (now - lastBreakTime < 120) return;
     lastBreakTime = now;
 
     if (mouseButton === 0) {
@@ -500,13 +627,14 @@ function getBlockAt(px, py) {
     if (gx < 0 || gx >= WORLD_WIDTH || gy < 0 || gy >= WORLD_HEIGHT) return 1;
     return world[gy][gx];
 }
-// Background blocks that can be walked through
-function solid(id) { return id !== 0 && id !== 7 && id !== 9 && id !== 10 && id !== 11; } 
+function solid(id) {
+    return [1, 2, 3, 4, 5, 8, 12, 13].includes(id);
+}
 
 function updatePhysics() {
     if (!myId || !players[myId]) return;
     const p = players[myId];
-    if (p.isDead) return; // Don't move if dead
+    if (p.isDead) return;
 
     const blockBelow = getBlockAt(p.x + BLOCK_SIZE * 0.4, p.y + BLOCK_SIZE + 1);
     onIce = blockBelow === 8;
@@ -578,38 +706,78 @@ function render() {
     const t = Date.now();
     updateCamera();
 
+    // 1. Dynamic Sky Gradient Interpolation based on Day/Night Cycle
     const skyGrd = ctx.createLinearGradient(0, 0, 0, canvas.height);
-    skyGrd.addColorStop(0, '#020408'); skyGrd.addColorStop(0.6, '#050d1a'); skyGrd.addColorStop(1, '#0a1628');
-    ctx.fillStyle = skyGrd; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const sec = currentGameTime;
 
-    for (const s of stars) {
-        s.blink += s.speed;
-        const alpha = 0.4 + 0.5 * Math.sin(s.blink);
-        ctx.fillStyle = `rgba(255,255,255,${alpha})`;
-        ctx.fillRect(s.x - camera.x * 0.03, s.y - camera.y * 0.01, s.size, s.size);
+    if (sec < 50) {
+        // DAYTIME
+        skyGrd.addColorStop(0, '#4a90e2');
+        skyGrd.addColorStop(1, '#87CEEB');
+    } else if (sec < 60) {
+        // SUNSET (50s - 60s)
+        const ratio = (sec - 50) / 10;
+        skyGrd.addColorStop(0, '#311b92');
+        skyGrd.addColorStop(1, ratio > 0.5 ? '#ff7e5f' : '#fd5e53');
+    } else if (sec < 110) {
+        // NIGHTTIME (60s - 110s)
+        skyGrd.addColorStop(0, '#020408');
+        skyGrd.addColorStop(0.6, '#050d1a');
+        skyGrd.addColorStop(1, '#0a1628');
+    } else {
+        // SUNRISE (110s - 120s)
+        const ratio = (sec - 110) / 10;
+        skyGrd.addColorStop(0, '#ff7e5f');
+        skyGrd.addColorStop(1, '#87CEEB');
+    }
+    ctx.fillStyle = skyGrd;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 2. Stars (Visible during night & sunset/sunrise)
+    if (sec >= 50 && sec <= 115) {
+        const starAlpha = sec < 60 ? (sec - 50) / 10 : (sec > 110 ? (115 - sec) / 5 : 1);
+        for (const s of stars) {
+            s.blink += s.speed;
+            const alpha = starAlpha * (0.4 + 0.5 * Math.sin(s.blink));
+            ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+            ctx.fillRect(s.x - camera.x * 0.03, s.y - camera.y * 0.01, s.size, s.size);
+        }
     }
 
-    const moonX = moon.x - camera.x * 0.05, moonY = moon.y - camera.y * 0.02;
-    const moonGlow = ctx.createRadialGradient(moonX, moonY, moon.r * 0.3, moonX, moonY, moon.r * 2.5);
-    moonGlow.addColorStop(0, 'rgba(240,240,200,0.12)'); moonGlow.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = moonGlow; ctx.beginPath(); ctx.arc(moonX, moonY, moon.r * 2.5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#f0f0c8'; ctx.beginPath(); ctx.arc(moonX, moonY, moon.r, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = 'rgba(0,0,0,0.08)';
-    ctx.beginPath(); ctx.arc(moonX + 12, moonY - 8, 8, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(moonX - 10, moonY + 12, 5, 0, Math.PI * 2); ctx.fill();
+    // 3. Sun & Moon Celestial Bodies
+    if (sec < 60) {
+        // SUN
+        const sunX = (canvas.width * (sec / 60)) - camera.x * 0.03;
+        const sunY = 80 + Math.sin(sec / 60 * Math.PI) * -40 - camera.y * 0.01;
+        ctx.fillStyle = '#fde047';
+        ctx.beginPath(); ctx.arc(sunX, sunY, sun.r, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(253, 224, 71, 0.2)';
+        ctx.beginPath(); ctx.arc(sunX, sunY, sun.r * 1.8, 0, Math.PI * 2); ctx.fill();
+    } else {
+        // MOON
+        const nightSec = sec - 60;
+        const moonX = (canvas.width * (nightSec / 60)) - camera.x * 0.03;
+        const moonY = 80 + Math.sin(nightSec / 60 * Math.PI) * -40 - camera.y * 0.01;
+        const moonGlow = ctx.createRadialGradient(moonX, moonY, moon.r * 0.3, moonX, moonY, moon.r * 2.5);
+        moonGlow.addColorStop(0, 'rgba(240,240,200,0.12)'); moonGlow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = moonGlow; ctx.beginPath(); ctx.arc(moonX, moonY, moon.r * 2.5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#f0f0c8'; ctx.beginPath(); ctx.arc(moonX, moonY, moon.r, 0, Math.PI * 2); ctx.fill();
+    }
 
+    // 4. Clouds
+    const cloudColor = sec >= 60 ? 'rgba(30,40,70,0.65)' : 'rgba(255,255,255,0.7)';
     for (const c of clouds) {
         c.x += c.speed;
         if (c.x - camera.x * 0.2 > canvas.width + 200) c.x = -c.size * 3;
-        ctx.fillStyle = 'rgba(30,40,70,0.65)';
+        ctx.fillStyle = cloudColor;
         const cx = c.x - camera.x * 0.2, cy = c.y - camera.y * 0.05;
         ctx.beginPath();
         ctx.arc(cx, cy, c.size, 0, Math.PI * 2);
         ctx.arc(cx + c.size * 0.6, cy - c.size * 0.2, c.size * 0.7, 0, Math.PI * 2);
-        ctx.arc(cx - c.size * 0.5, cy + c.size * 0.1, c.size * 0.6, 0, Math.PI * 2);
         ctx.fill();
     }
 
+    // 5. World Blocks
     const startX = Math.max(0, Math.floor(camera.x / BLOCK_SIZE));
     const endX   = Math.min(WORLD_WIDTH,  Math.ceil((camera.x + canvas.width)  / BLOCK_SIZE));
     const startY = Math.max(0, Math.floor(camera.y / BLOCK_SIZE));
@@ -622,6 +790,16 @@ function render() {
         }
     }
 
+    // 6. Dropped Items
+    for (const item of droppedItems) {
+        const ix = item.x - camera.x;
+        const iy = item.y - camera.y + Math.sin(t / 200 + item.id) * 3;
+        drawBlock(ctx, item.itemType, ix, iy, 18, t);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath(); ctx.ellipse(ix + 9, iy + 20, 7, 2, 0, 0, Math.PI*2); ctx.fill();
+    }
+
+    // 7. Particles
     for (let i = particles.length - 1; i >= 0; i--) {
         const pt = particles[i];
         pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.3; pt.life -= pt.decay;
@@ -631,6 +809,12 @@ function render() {
     }
     ctx.globalAlpha = 1;
 
+    // 8. Knight Mobs
+    for (const mob of mobs) {
+        drawKnightMob(ctx, mob, camera);
+    }
+
+    // 9. Players
     for (const id in players) {
         const p = players[id];
         let sx = p.x - camera.x;
@@ -640,25 +824,20 @@ function render() {
         ctx.translate(sx + BLOCK_SIZE / 2, sy + BLOCK_SIZE / 2);
 
         if (p.isDead) {
-            // Death Animation: Ghost flying up and spinning
-            const dt = t - p.deathTime;
-            sy -= (dt / 15); // float up
-            ctx.translate(0, - (dt / 15));
-            ctx.rotate(dt / 100); // spin
-            ctx.globalAlpha = Math.max(0, 1 - (dt / 2500)); // fade out
-            
-            // Draw ghost blob
+            const dt = t - (p.deathTime || t);
+            ctx.translate(0, -(dt / 15));
+            ctx.rotate(dt / 100);
+            ctx.globalAlpha = Math.max(0, 1 - (dt / 2500));
             ctx.fillStyle = '#a8a29e';
             ctx.beginPath(); ctx.arc(0, 0, BLOCK_SIZE/2, 0, Math.PI*2); ctx.fill();
-            ctx.fillStyle = 'rgba(255,255,255,0.7)';
-            ctx.beginPath(); ctx.arc(-5, -5, 4, 0, Math.PI*2); ctx.arc(5, -5, 4, 0, Math.PI*2); ctx.fill();
         } else {
             const vx = p.vx || 0;
-            if (vx > 0.4) p.facingRight = true;
-            else if (vx < -0.4) p.facingRight = false;
+            if (vx > 0.3) p.facingRight = true;
+            else if (vx < -0.3) p.facingRight = false;
             
-            // If facing left, flip horizontally
-            if (!p.facingRight) ctx.scale(-1, 1);
+            if (p.facingRight === false) {
+                ctx.scale(-1, 1);
+            }
             
             ctx.translate(-BLOCK_SIZE / 2, -BLOCK_SIZE / 2);
             drawCharacter(ctx, BLOCK_SIZE, vx, id === myId ? playerVelocityY : 0, id === myId ? isGrounded : true, actionAnim, actionAnimTimer, id === myId);

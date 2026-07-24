@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LegionTopia Alpha</title>
+    <title>BlockWorld Alpha</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -12,8 +12,11 @@
     
     <div class="main-container">
         <div class="header-glass">
-            <h1>⚔️ LegionTopia <span class="badge">Alpha</span></h1>
-            <div id="adminBadge" class="admin-badge hidden">🛡️ ADMIN ACTIVE</div>
+            <h1>BlockWorld <span class="badge">Alpha</span></h1>
+            <div class="header-right">
+                <div id="timeWidget" class="time-widget">🌞 Day (01:00)</div>
+                <div id="adminBadge" class="admin-badge hidden">🛡️ ADMIN ACTIVE</div>
+            </div>
         </div>
         
         <div class="game-area">
@@ -37,23 +40,25 @@
                     <button class="inv-toggle-btn" id="openInvBtn" title="Open Inventory (E)">🎒</button>
                 </div>
 
-                <!-- Inventory Overlay -->
+                <!-- Inventory & Crafting Overlay -->
                 <div class="inventory-overlay hidden" id="inventoryOverlay">
                     <div class="inventory-window">
                         <div class="inv-header">
-                            <h2>🎒 Inventory</h2>
+                            <h2>🎒 Inventory & Crafting</h2>
                             <button class="close-inv" id="closeInvBtn">✖</button>
                         </div>
                         <div class="inv-tabs">
                             <button class="tab-btn active" data-tab="blocks">Blocks</button>
                             <button class="tab-btn" data-tab="bg">Backgrounds</button>
                             <button class="tab-btn" data-tab="deadly">Deadly</button>
+                            <button class="tab-btn" data-tab="weapons">Weapons</button>
+                            <button class="tab-btn" data-tab="crafting">🛠️ Crafting</button>
                         </div>
                         <div class="inv-content" id="invContent">
                             <!-- Populated by JS -->
                         </div>
-                        <div class="inv-footer">
-                            Select a hotbar slot (1-5) then click an item here to assign it.
+                        <div class="inv-footer" id="invFooter">
+                            Select a hotbar slot (1-5) then click an item to assign it.
                         </div>
                     </div>
                 </div>
@@ -70,7 +75,7 @@
         </div>
         
         <div class="controls-hint">
-            <strong>Controls:</strong> WASD/Arrows = Move | Left Click = Break | Right Click = Place | 1–5 = Select Hotbar Slot | E = Inventory
+            <strong>Controls:</strong> WASD/Arrows = Move | Left Click = Break/Attack | Right Click = Place | 1–5 = Hotbar | E = Inventory | G = Drop Item
         </div>
         
         <!-- Mobile Virtual Controls -->

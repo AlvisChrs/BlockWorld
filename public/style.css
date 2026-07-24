@@ -52,11 +52,23 @@ h1 { font-size: 1.3rem; font-weight: 700; display: flex; align-items: center; ga
 
 .badge {
     font-size: 0.65rem;
-    background: linear-gradient(135deg, #ef4444, #f59e0b);
+    background: linear-gradient(135deg, #10b981, #3b82f6);
     padding: 3px 8px;
     border-radius: 6px;
     text-transform: uppercase;
     letter-spacing: 1px;
+}
+
+.header-right { display: flex; align-items: center; gap: 12px; }
+
+.time-widget {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #fcd34d;
 }
 
 .admin-badge {
@@ -174,13 +186,13 @@ canvas {
 }
 .inv-toggle-btn:hover { background: #334155; transform: scale(1.05); }
 
-/* Block Select Items (used in hotbar & inventory) */
+/* Block Select Items */
 .block-select {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 2px;
-    width: 50px;
+    width: 52px;
     padding: 6px 4px;
     border-radius: 8px;
     background: #0f172a;
@@ -208,6 +220,17 @@ canvas {
     box-shadow: 0 2px 4px rgba(0,0,0,0.5);
 }
 
+.block-select .item-qty {
+    position: absolute;
+    bottom: 2px; right: 4px;
+    background: rgba(0,0,0,0.7);
+    color: #38bdf8;
+    border-radius: 4px;
+    padding: 1px 3px;
+    font-size: 9px;
+    font-weight: bold;
+}
+
 .block-select:hover { transform: translateY(-2px); background: #1e293b; }
 .block-select.active {
     border-color: var(--accent);
@@ -226,7 +249,7 @@ canvas {
     image-rendering: pixelated;
 }
 
-/* Inventory Overlay */
+/* Inventory & Crafting Overlay */
 .inventory-overlay {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
@@ -244,7 +267,7 @@ canvas {
     border: 1px solid #334155;
     border-radius: 12px;
     width: 90%;
-    max-width: 500px;
+    max-width: 540px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.6);
     display: flex;
     flex-direction: column;
@@ -278,7 +301,7 @@ canvas {
     border: none;
     border-radius: 0;
     padding: 10px;
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     cursor: pointer;
     border-bottom: 2px solid transparent;
 }
@@ -290,7 +313,9 @@ canvas {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    min-height: 180px;
+    min-height: 200px;
+    max-height: 300px;
+    overflow-y: auto;
     align-content: flex-start;
 }
 
@@ -303,6 +328,55 @@ canvas {
     border-top: 1px solid #334155;
 }
 
+/* Crafting UI Cards */
+.craft-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 10px;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.craft-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.craft-details {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.craft-title {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: #f8fafc;
+}
+
+.craft-req {
+    font-size: 0.7rem;
+    color: #94a3b8;
+}
+
+.craft-btn {
+    background: linear-gradient(135deg, #22c55e, #16a34a);
+    color: white;
+    border: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: transform 0.15s, filter 0.15s;
+}
+.craft-btn:hover { transform: scale(1.04); filter: brightness(1.1); }
+.craft-btn:disabled { background: #475569; cursor: not-allowed; opacity: 0.6; }
 
 /* Chat Box */
 .chat-glass {
