@@ -22,8 +22,8 @@ let canFly = false, noclip = false;
 let isAdmin = false;
 let myInventory = {};
 
-// Time & Day/Night Cycle State (120s cycle)
-let currentGameTime = 0; // 0..120
+// Time & Day/Night Cycle State
+let currentGameTime = 0;
 let isNightTime = false;
 
 // ─── Physics Constants ─────────────────────────────────────────────────────────
@@ -40,12 +40,13 @@ const keys = { w:false,a:false,s:false,d:false,ArrowUp:false,ArrowLeft:false,Arr
 const mobileKeys = { left:false, right:false, jump:false };
 
 // Hotbar & Inventory State
-let hotbar = [1, 2, 3, 4, 101]; // Default slots 1-5
+let hotbar = [1, 2, 3, 4, 10]; // Starter hotbar includes Door (10)
 let activeSlotIndex = 0;
 let selectedBlockId = hotbar[0];
 let isMouseDown = false;
 let mouseButton = -1;
 let lastBreakTime = 0;
+let lastDoorWarpTime = 0;
 
 // Inventory Categories
 const INV_DATA = {
@@ -73,6 +74,7 @@ const RECIPES_LIST = [
 let playerVelocityX = 0, playerVelocityY = 0;
 let isGrounded = false;
 let onIce = false;
+let standingOnDoor = false;
 let actionAnim = ''; 
 let actionAnimTimer = 0;
 
@@ -112,6 +114,22 @@ function spawnParticles(gx, gy, color) {
         });
     }
 }
+
+function spawnPortalWarpParticles(pixelX, pixelY) {
+    for (let i = 0; i < 24; i++) {
+        particles.push({
+            x: pixelX + Math.random() * BLOCK_SIZE,
+            y: pixelY + Math.random() * BLOCK_SIZE,
+            vx: (Math.random() - 0.5) * 8,
+            vy: (Math.random() - 0.5) * 8,
+            life: 1.0,
+            decay: 0.03,
+            size: 4 + Math.random() * 4,
+            color: Math.random() < 0.5 ? '#c084fc' : '#38bdf8' // Purple & cyan portal spark
+        });
+    }
+}
+
 const BLOCK_PARTICLE_COLORS = {
     1:'#8B4513', 2:'#4a8c3f', 3:'#6b7280', 4:'#5c3a21',
     5:'#22863a', 6:'rgba(147,197,253,0.8)', 7:'#ff4500', 8:'#bae6fd',
@@ -184,9 +202,11 @@ function drawBlock(ctx, blockId, sx, sy, bs, time) {
             ctx.fillStyle = '#2f2f3a'; ctx.fillRect(0, 7, bs, 2); ctx.fillRect(0, 15, bs, 2);
             ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(0, 0, bs, bs);
             break;
-        case 10: // Door
+        case 10: // Door (Animated Glow)
             ctx.fillStyle = '#8a5a32'; ctx.fillRect(0, 0, bs, bs);
             ctx.strokeStyle = '#52341b'; ctx.lineWidth = 2; ctx.strokeRect(2, 2, bs-4, bs-4);
+            ctx.strokeRect(6, 6, bs-12, bs/2 - 8);
+            ctx.strokeRect(6, bs/2 + 2, bs-12, bs/2 - 8);
             ctx.fillStyle = '#eab308'; ctx.beginPath(); ctx.arc(bs - 6, bs/2, 2.5, 0, Math.PI*2); ctx.fill();
             break;
         case 11: // Spike
@@ -240,6 +260,120 @@ function generateIcons() {
     }
 }
 generateIcons();
+
+// ─── Procedural Web Audio API BGM & Rain Sound Generator ──────────────────────
+class LofiAudioEngine {
+    constructor() {
+        this.audioCtx = null;
+        this.isPlaying = false;
+        this.masterGain = null;
+        this.rainGain = null;
+        this.chordTimer = null;
+    }
+
+    init() {
+        if (this.audioCtx) return;
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        this.audioCtx = new AudioContext();
+
+        this.masterGain = this.audioCtx.createGain();
+        this.masterGain.gain.value = 0.15; // soft volume
+        this.masterGain.connect(this.audioCtx.destination);
+
+        // Rain Noise Generator setup
+        this.setupRainNoise();
+    }
+
+    setupRainNoise() {
+        const bufferSize = 2 * this.audioCtx.sampleRate;
+        const noiseBuffer = this.audioCtx.createBuffer(1, bufferSize, this.audioCtx.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            output[i] = Math.random() * 2 - 1; // Pink/white noise
+        }
+
+        const whiteNoise = this.audioCtx.createBufferSource();
+        whiteNoise.buffer = noiseBuffer;
+        whiteNoise.loop = true;
+
+        // Lowpass filter to make it sound like gentle rain
+        const filter = this.audioCtx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 1000;
+
+        this.rainGain = this.audioCtx.createGain();
+        this.rainGain.gain.value = 0.05; // soft rain
+
+        whiteNoise.connect(filter);
+        filter.connect(this.rainGain);
+        this.rainGain.connect(this.masterGain);
+        whiteNoise.start();
+    }
+
+    playLofiChord() {
+        if (!this.isPlaying || !this.audioCtx) return;
+
+        // Smooth Lofi 7th Chord Progression (Cmaj7 -> Am7 -> Dm7 -> G7)
+        const chords = [
+            [261.63, 329.63, 392.00, 493.88], // Cmaj7
+            [220.00, 261.63, 329.63, 392.00], // Am7
+            [293.66, 349.23, 440.00, 523.25], // Dm7
+            [196.00, 246.94, 293.66, 349.23]  // G7
+        ];
+
+        const chord = chords[Math.floor(Math.random() * chords.length)];
+        const now = this.audioCtx.currentTime;
+
+        chord.forEach((freq, idx) => {
+            const osc = this.audioCtx.createOscillator();
+            const gain = this.audioCtx.createGain();
+            const filter = this.audioCtx.createBiquadFilter();
+
+            osc.type = 'triangle'; // Warm lofi tone
+            osc.frequency.setValueAtTime(freq * 0.5, now); // 1 octave lower
+
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(600, now);
+
+            // Envelope: soft attack, long decay
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.04 - (idx * 0.005), now + 0.3);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 3.8);
+
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(this.masterGain);
+
+            osc.start(now + idx * 0.08); // Slight arpeggio feel
+            osc.stop(now + 4.0);
+        });
+    }
+
+    toggle() {
+        this.init();
+        if (this.audioCtx.state === 'suspended') {
+            this.audioCtx.resume();
+        }
+
+        this.isPlaying = !this.isPlaying;
+        const btn = document.getElementById('audioToggleBtn');
+
+        if (this.isPlaying) {
+            btn.classList.add('active');
+            btn.textContent = '🎵 BGM & Rain: ON';
+            this.playLofiChord();
+            this.chordTimer = setInterval(() => this.playLofiChord(), 4000);
+        } else {
+            btn.classList.remove('active');
+            btn.textContent = '🎵 BGM & Rain: OFF';
+            if (this.chordTimer) clearInterval(this.chordTimer);
+            if (this.masterGain) this.masterGain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+        }
+    }
+}
+
+const lofiAudio = new LofiAudioEngine();
+document.getElementById('audioToggleBtn').onclick = () => lofiAudio.toggle();
 
 // ─── UI Setup: Hotbar & Inventory ─────────────────────────────────────────────
 function renderHotbar() {
@@ -310,7 +444,6 @@ function renderInventoryTab(tabName) {
     }
 }
 
-// Overlay Toggle
 const invOverlay = document.getElementById('inventoryOverlay');
 document.getElementById('openInvBtn').onclick = () => invOverlay.classList.remove('hidden');
 document.getElementById('closeInvBtn').onclick = () => invOverlay.classList.add('hidden');
@@ -325,7 +458,6 @@ window.addEventListener('keydown', (e) => {
     }
 });
 
-// Tab Listeners
 document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.onclick = () => {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -360,33 +492,26 @@ function drawCharacter(ctx, bs, vx, vy, onGround, actionAnim, actionTimer, isMin
     const bob = isWalking ? Math.abs(Math.sin(walkCycle)) * 1.5 : 0;
     const yBase = bs * 0.1 + bob;
 
-    // DEFAULT DRAWING FACES RIGHT (+x)
-    // BACK ARM
     ctx.save(); ctx.translate(half, yBase + hd + bh * 0.3); ctx.rotate(-armSwing);
     ctx.fillStyle = SHIRT; ctx.fillRect(-lw * 0.5 - bw / 2 - 1, 0, lw, ll);
     ctx.fillStyle = SKIN; ctx.fillRect(-lw * 0.5 - bw / 2 - 1, ll - 1, lw, lw * 1.2); ctx.restore();
 
-    // BACK LEG
     ctx.save(); ctx.translate(half - bs * 0.06, yBase + hd + bh); ctx.rotate(-legSwing);
     ctx.fillStyle = PANTS; ctx.fillRect(-lw, 0, lw * 1.5, ll * 0.9);
     ctx.fillStyle = SHOE; ctx.fillRect(-lw * 0.2, ll * 0.85, foot * 1.2, foot * 0.7); ctx.restore();
 
-    // BODY
     ctx.fillStyle = SHIRT; ctx.fillRect(half - bw, yBase + hd - 2, bw * 2, bh + 4);
     ctx.fillStyle = 'rgba(0,0,0,0.1)'; ctx.fillRect(half - bw + 2, yBase + hd + 4, bw * 2 - 4, 2);
 
-    // FRONT LEG
     ctx.save(); ctx.translate(half + bs * 0.06, yBase + hd + bh); ctx.rotate(legSwing);
     ctx.fillStyle = PANTS; ctx.fillRect(-lw, 0, lw * 1.5, ll * 0.9);
     ctx.fillStyle = SHOE; ctx.fillRect(0, ll * 0.85, foot * 1.2, foot * 0.7); ctx.restore();
 
-    // HEAD (Facing Right)
     ctx.fillStyle = SKIN; ctx.fillRect(half - hd / 2, yBase, hd, hd);
     ctx.fillStyle = HAIR; ctx.fillRect(half - hd / 2, yBase, hd, hd * 0.3);
     ctx.fillStyle = EYE; ctx.fillRect(half + hd * 0.15, yBase + hd * 0.35, hd * 0.12, hd * 0.14);
     ctx.fillStyle = '#c0392b'; ctx.fillRect(half + hd * 0.15, yBase + hd * 0.65, hd * 0.2, hd * 0.06);
 
-    // FRONT ARM / WEAPON HELD
     ctx.save(); ctx.translate(half, yBase + hd + bh * 0.3); ctx.rotate(armSwing);
     ctx.fillStyle = SHIRT; ctx.fillRect(bw / 2 + 1, 0, lw, ll);
     ctx.fillStyle = SKIN; ctx.fillRect(bw / 2 + 1, ll - 1, lw, lw * 1.2);
@@ -405,7 +530,6 @@ function drawCharacter(ctx, bs, vx, vy, onGround, actionAnim, actionTimer, isMin
     }
 }
 
-// ─── Knight Mob Renderer ───────────────────────────────────────────────────────
 function drawKnightMob(ctx, mob, camera) {
     const sx = mob.x - camera.x;
     const sy = mob.y - camera.y;
@@ -434,7 +558,6 @@ function drawKnightMob(ctx, mob, camera) {
     ctx.fillRect(sx, sy - 8, bs * hpRatio, 4);
 }
 
-// ─── HP HUD ───────────────────────────────────────────────────────────────────
 function renderHpHud(hp) {
     const container = document.getElementById('hpHearts');
     container.innerHTML = '';
@@ -477,7 +600,6 @@ socket.on('time_sync', data => {
     currentGameTime = data.gameTime;
     isNightTime = data.isNight;
     
-    // Update Time Widget UI
     const widget = document.getElementById('timeWidget');
     if (widget) {
         const remSecs = isNightTime ? (120 - currentGameTime) : (60 - currentGameTime);
@@ -524,6 +646,10 @@ socket.on('mob_died', data => {
     showAction('💥 Knight Defeated!', 1500);
 });
 
+socket.on('door_warped', data => {
+    spawnPortalWarpParticles(data.x, data.y);
+});
+
 socket.on('hp_update', (hp) => { myHp = hp; renderHpHud(hp); });
 
 socket.on('player_died', (id) => {
@@ -540,7 +666,6 @@ socket.on('respawn', (d) => {
     }
     myHp = d.hp; playerVelocityX = 0; playerVelocityY = 0;
     renderHpHud(d.hp);
-    showAction('✨ Respawned!', 1500);
 });
 
 socket.on('admin_status', (s) => {
@@ -563,6 +688,18 @@ function showAction(msg, duration = 800) {
 window.addEventListener('keydown', e => {
     if (keys.hasOwnProperty(e.key) && document.activeElement !== document.getElementById('chatInput')) {
         keys[e.key] = true;
+
+        // Trigger Door Warp on 'W' or 'ArrowUp'
+        if (e.key.toLowerCase() === 'w' || e.key === 'ArrowUp') {
+            if (standingOnDoor) {
+                const now = Date.now();
+                if (now - lastDoorWarpTime > 500) {
+                    lastDoorWarpTime = now;
+                    socket.emit('enter_door');
+                }
+            }
+        }
+
         if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
     }
     if (/^[1-5]$/.test(e.key) && document.activeElement !== document.getElementById('chatInput')) {
@@ -640,6 +777,19 @@ function updatePhysics() {
     onIce = blockBelow === 8;
     const friction = onIce ? FRICTION_ICE : FRICTION_NORMAL;
 
+    // Check if player is standing on/in a Door block
+    const pgx = Math.floor((p.x + BLOCK_SIZE / 2) / BLOCK_SIZE);
+    const pgy = Math.floor((p.y + BLOCK_SIZE / 2) / BLOCK_SIZE);
+    const blockStanding = getBlockAt(p.x + BLOCK_SIZE / 2, p.y + BLOCK_SIZE / 2);
+    const blockFoot = getBlockAt(p.x + BLOCK_SIZE / 2, p.y + BLOCK_SIZE - 4);
+    standingOnDoor = blockStanding === 10 || blockFoot === 10;
+
+    const promptEl = document.getElementById('doorPrompt');
+    if (promptEl) {
+        if (standingOnDoor) promptEl.classList.remove('hidden');
+        else promptEl.classList.add('hidden');
+    }
+
     let movingX = false;
     if (keys.a || keys.ArrowLeft || mobileKeys.left) { playerVelocityX -= ACCEL; movingX = true; }
     if (keys.d || keys.ArrowRight || mobileKeys.right) { playerVelocityX += ACCEL; movingX = true; }
@@ -706,26 +856,21 @@ function render() {
     const t = Date.now();
     updateCamera();
 
-    // 1. Dynamic Sky Gradient Interpolation based on Day/Night Cycle
     const skyGrd = ctx.createLinearGradient(0, 0, 0, canvas.height);
     const sec = currentGameTime;
 
     if (sec < 50) {
-        // DAYTIME
         skyGrd.addColorStop(0, '#4a90e2');
         skyGrd.addColorStop(1, '#87CEEB');
     } else if (sec < 60) {
-        // SUNSET (50s - 60s)
         const ratio = (sec - 50) / 10;
         skyGrd.addColorStop(0, '#311b92');
         skyGrd.addColorStop(1, ratio > 0.5 ? '#ff7e5f' : '#fd5e53');
     } else if (sec < 110) {
-        // NIGHTTIME (60s - 110s)
         skyGrd.addColorStop(0, '#020408');
         skyGrd.addColorStop(0.6, '#050d1a');
         skyGrd.addColorStop(1, '#0a1628');
     } else {
-        // SUNRISE (110s - 120s)
         const ratio = (sec - 110) / 10;
         skyGrd.addColorStop(0, '#ff7e5f');
         skyGrd.addColorStop(1, '#87CEEB');
@@ -733,7 +878,6 @@ function render() {
     ctx.fillStyle = skyGrd;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // 2. Stars (Visible during night & sunset/sunrise)
     if (sec >= 50 && sec <= 115) {
         const starAlpha = sec < 60 ? (sec - 50) / 10 : (sec > 110 ? (115 - sec) / 5 : 1);
         for (const s of stars) {
@@ -744,9 +888,7 @@ function render() {
         }
     }
 
-    // 3. Sun & Moon Celestial Bodies
     if (sec < 60) {
-        // SUN
         const sunX = (canvas.width * (sec / 60)) - camera.x * 0.03;
         const sunY = 80 + Math.sin(sec / 60 * Math.PI) * -40 - camera.y * 0.01;
         ctx.fillStyle = '#fde047';
@@ -754,7 +896,6 @@ function render() {
         ctx.fillStyle = 'rgba(253, 224, 71, 0.2)';
         ctx.beginPath(); ctx.arc(sunX, sunY, sun.r * 1.8, 0, Math.PI * 2); ctx.fill();
     } else {
-        // MOON
         const nightSec = sec - 60;
         const moonX = (canvas.width * (nightSec / 60)) - camera.x * 0.03;
         const moonY = 80 + Math.sin(nightSec / 60 * Math.PI) * -40 - camera.y * 0.01;
@@ -764,7 +905,6 @@ function render() {
         ctx.fillStyle = '#f0f0c8'; ctx.beginPath(); ctx.arc(moonX, moonY, moon.r, 0, Math.PI * 2); ctx.fill();
     }
 
-    // 4. Clouds
     const cloudColor = sec >= 60 ? 'rgba(30,40,70,0.65)' : 'rgba(255,255,255,0.7)';
     for (const c of clouds) {
         c.x += c.speed;
@@ -777,7 +917,6 @@ function render() {
         ctx.fill();
     }
 
-    // 5. World Blocks
     const startX = Math.max(0, Math.floor(camera.x / BLOCK_SIZE));
     const endX   = Math.min(WORLD_WIDTH,  Math.ceil((camera.x + canvas.width)  / BLOCK_SIZE));
     const startY = Math.max(0, Math.floor(camera.y / BLOCK_SIZE));
@@ -790,7 +929,6 @@ function render() {
         }
     }
 
-    // 6. Dropped Items
     for (const item of droppedItems) {
         const ix = item.x - camera.x;
         const iy = item.y - camera.y + Math.sin(t / 200 + item.id) * 3;
@@ -799,7 +937,6 @@ function render() {
         ctx.beginPath(); ctx.ellipse(ix + 9, iy + 20, 7, 2, 0, 0, Math.PI*2); ctx.fill();
     }
 
-    // 7. Particles
     for (let i = particles.length - 1; i >= 0; i--) {
         const pt = particles[i];
         pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.3; pt.life -= pt.decay;
@@ -809,12 +946,10 @@ function render() {
     }
     ctx.globalAlpha = 1;
 
-    // 8. Knight Mobs
     for (const mob of mobs) {
         drawKnightMob(ctx, mob, camera);
     }
 
-    // 9. Players
     for (const id in players) {
         const p = players[id];
         let sx = p.x - camera.x;
@@ -867,7 +1002,11 @@ chatForm.addEventListener('submit', e => {
 
 socket.on('chat_message', msg => {
     const li = document.createElement('li');
-    li.innerHTML = `<span style="color:${msg.color};font-weight:bold;">Player:</span> ${msg.text}`;
+    const name = document.createElement('span');
+    name.style.color = msg.color;
+    name.style.fontWeight = 'bold';
+    name.textContent = 'Player:';
+    li.append(name, ` ${msg.text}`);
     chatMessages.appendChild(li);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 });

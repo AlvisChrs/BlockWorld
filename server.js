@@ -16,10 +16,12 @@ const MAX_HP = 20;
 const LAVA_DAMAGE_INTERVAL = 500;
 const HP_REGEN_INTERVAL = 5000;
 const MAX_BUILD_RANGE = 4;
+const MAX_PLAYER_SPEED = 900; // pixels/second; allows normal falling while rejecting teleports
+const MOVE_DISTANCE_TOLERANCE = 48;
 
 // Day / Night Cycle Constants (Total 120s: 60s Day, 60s Night)
-const CYCLE_DURATION = 120; // seconds
-let gameTime = 0; // 0 to 120
+const CYCLE_DURATION = 120;
+let gameTime = 0;
 
 // Block & Item IDs
 const BLOCKS = {
@@ -57,7 +59,7 @@ const isBackground = (id) => [
     BLOCKS.AIR, BLOCKS.LAVA, BLOCKS.WALL, BLOCKS.DOOR, BLOCKS.SPIKE
 ].includes(id);
 
-// ─── Procedural Natural World Generation (Terraria-style) ─────────────────────
+// ─── Procedural Natural World Generation ──────────────────────────────────────
 let world = [];
 function generateNaturalWorld() {
     world = [];
@@ -121,6 +123,21 @@ let nextMobId = 1;
 function getBlock(x, y) {
     if (x < 0 || x >= WORLD_WIDTH || y < 0 || y >= WORLD_HEIGHT) return BLOCKS.AIR;
     return world[y][x];
+}
+
+function getAllDoors() {
+    const doors = [];
+    for (let y = 0; y < WORLD_HEIGHT; y++) {
+        for (let x = 0; x < WORLD_WIDTH; x++) {
+            if (world[y][x] === BLOCKS.DOOR) {
+                // Group contiguous vertical door blocks as one door location
+                if (y === 0 || world[y-1][x] !== BLOCKS.DOOR) {
+                    doors.push({ x, y });
+                }
+            }
+        }
+    }
+    return doors;
 }
 
 function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
@@ -352,7 +369,8 @@ io.on('connection', (socket) => {
         [BLOCKS.LEAVES]: 10,
         [BLOCKS.GLASS]: 5,
         [BLOCKS.LAVA]: 5,
-        [BLOCKS.ICE]: 5
+        [BLOCKS.ICE]: 5,
+        [BLOCKS.DOOR]: 4 // Provide doors to test Door Warp!
     };
 
     players[socket.id] = {
@@ -366,6 +384,7 @@ io.on('connection', (socket) => {
         noclip: false,
         hp: MAX_HP,
         lastDamageTime: 0,
+        lastMoveAt: Date.now(),
         inventory: starterInventory
     };
 
@@ -388,11 +407,61 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('player_joined', players[socket.id]);
 
     socket.on('player_move', (data) => {
-        if (players[socket.id] && players[socket.id].hp > 0) {
-            players[socket.id].x = data.x;
-            players[socket.id].y = data.y;
-            players[socket.id].vx = data.vx || 0;
-            socket.broadcast.emit('player_moved', players[socket.id]);
+        const p = players[socket.id];
+        if (!p || p.hp <= 0 || !data) return;
+
+        const { x, y, vx = 0 } = data;
+        if (![x, y, vx].every(Number.isFinite)) return;
+        if (x < 0 || x > WORLD_WIDTH * BLOCK_SIZE - BLOCK_SIZE ||
+            y < 0 || y > WORLD_HEIGHT * BLOCK_SIZE - BLOCK_SIZE) return;
+
+        const now = Date.now();
+        const elapsed = Math.min(now - p.lastMoveAt, 250);
+        const maxDistance = MOVE_DISTANCE_TOLERANCE + (MAX_PLAYER_SPEED * elapsed / 1000);
+        if (Math.hypot(x - p.x, y - p.y) > maxDistance) return;
+
+        p.x = x;
+        p.y = y;
+        p.vx = vx;
+        p.lastMoveAt = now;
+        socket.broadcast.emit('player_moved', p);
+    });
+
+    // 🚪 Door Warp Teleportation Logic
+    socket.on('enter_door', () => {
+        const p = players[socket.id];
+        if (!p || p.hp <= 0) return;
+
+        const pgx = Math.floor((p.x + BLOCK_SIZE / 2) / BLOCK_SIZE);
+        const pgy = Math.floor((p.y + BLOCK_SIZE / 2) / BLOCK_SIZE);
+
+        // Check if player is standing in front of a Door block
+        if (getBlock(pgx, pgy) === BLOCKS.DOOR || getBlock(pgx, pgy + 1) === BLOCKS.DOOR || getBlock(pgx, pgy - 1) === BLOCKS.DOOR) {
+            const allDoors = getAllDoors();
+            if (allDoors.length < 2) {
+                socket.emit('server_message', '🚪 You need at least 2 Doors placed in the world to warp!');
+                return;
+            }
+
+            // Find current door index and target the next door in sequence
+            const curDoorIdx = allDoors.findIndex(d => Math.abs(d.x - pgx) <= 1 && Math.abs(d.y - pgy) <= 1);
+            const targetIdx = (curDoorIdx + 1) % allDoors.length;
+            const targetDoor = allDoors[targetIdx];
+
+            // Emit warp effect particles at current position
+            io.emit('door_warped', { x: p.x, y: p.y });
+
+            // Teleport player to target door
+            p.x = targetDoor.x * BLOCK_SIZE;
+            p.y = targetDoor.y * BLOCK_SIZE;
+            p.lastMoveAt = Date.now();
+
+            // Emit warp effect particles at destination
+            io.emit('door_warped', { x: p.x, y: p.y });
+
+            io.to(socket.id).emit('respawn', { x: p.x, y: p.y, hp: p.hp });
+            io.emit('player_moved', p);
+            socket.emit('server_message', `🚪 Warped to Door at (${targetDoor.x}, ${targetDoor.y})!`);
         }
     });
 
@@ -404,9 +473,11 @@ io.on('connection', (socket) => {
     }
 
     socket.on('break_block', (data) => {
+        if (!data) return;
         const { gridX, gridY } = data;
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
+        if (!Number.isInteger(gridX) || !Number.isInteger(gridY)) return;
 
         if (gridX >= 0 && gridX < WORLD_WIDTH && gridY >= 0 && gridY < WORLD_HEIGHT) {
             if (!checkRange(p, gridX, gridY)) return;
@@ -421,9 +492,12 @@ io.on('connection', (socket) => {
     });
 
     socket.on('place_block', (data) => {
+        if (!data) return;
         const { gridX, gridY, blockId } = data;
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
+        if (!Number.isInteger(gridX) || !Number.isInteger(gridY) ||
+            !Object.values(BLOCKS).includes(blockId) || blockId === BLOCKS.AIR) return;
 
         if (gridX >= 0 && gridX < WORLD_WIDTH && gridY >= 0 && gridY < WORLD_HEIGHT) {
             if (!checkRange(p, gridX, gridY)) return;
@@ -446,6 +520,7 @@ io.on('connection', (socket) => {
     socket.on('drop_item', (data) => {
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
+        if (!data) return;
         const { itemType } = data;
 
         if (p.inventory[itemType] && p.inventory[itemType] > 0) {
@@ -485,6 +560,7 @@ io.on('connection', (socket) => {
     socket.on('attack_mob', (data) => {
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
+        if (!data) return;
         const { mobId, weaponId } = data;
 
         const mobIndex = mobs.findIndex(m => m.id === mobId);
@@ -495,8 +571,8 @@ io.on('connection', (socket) => {
         if (dist > 3 * BLOCK_SIZE) return;
 
         let damage = 1;
-        if (weaponId === ITEMS.WOODEN_SWORD) damage = 3;
-        if (weaponId === ITEMS.STONE_SWORD) damage = 5;
+        if (weaponId === ITEMS.WOODEN_SWORD && p.inventory[ITEMS.WOODEN_SWORD] > 0) damage = 3;
+        if (weaponId === ITEMS.STONE_SWORD && p.inventory[ITEMS.STONE_SWORD] > 0) damage = 5;
 
         mob.hp -= damage;
         mob.vx = (mob.x > p.x ? 1 : -1) * 5;
@@ -514,7 +590,9 @@ io.on('connection', (socket) => {
 
     socket.on('chat_message', (msg) => {
         const player = players[socket.id];
-        if (!player) return;
+        if (!player || typeof msg !== 'string') return;
+        msg = msg.trim().slice(0, 300);
+        if (!msg) return;
 
         if (msg.startsWith('/')) {
             const args = msg.split(' ');

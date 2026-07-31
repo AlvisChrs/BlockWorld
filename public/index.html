@@ -14,6 +14,7 @@
         <div class="header-glass">
             <h1>BlockWorld <span class="badge">Alpha</span></h1>
             <div class="header-right">
+                <button id="audioToggleBtn" class="audio-btn">🎵 BGM & Rain: OFF</button>
                 <div id="timeWidget" class="time-widget">🌞 Day (01:00)</div>
                 <div id="adminBadge" class="admin-badge hidden">🛡️ ADMIN ACTIVE</div>
             </div>
@@ -31,6 +32,9 @@
                 
                 <!-- HUD: Action indicator -->
                 <div class="action-indicator hidden" id="actionIndicator"></div>
+
+                <!-- HUD: Door Prompt -->
+                <div class="door-prompt hidden" id="doorPrompt">🚪 Press W to Enter Door</div>
 
                 <!-- HUD: Hotbar (Slots 1-5) -->
                 <div class="hotbar-container">
@@ -75,7 +79,7 @@
         </div>
         
         <div class="controls-hint">
-            <strong>Controls:</strong> WASD/Arrows = Move | Left Click = Break/Attack | Right Click = Place | 1–5 = Hotbar | E = Inventory | G = Drop Item
+            <strong>Controls:</strong> WASD/Arrows = Move & Enter Door | Left Click = Break/Attack | Right Click = Place | 1–5 = Hotbar | E = Inventory | G = Drop Item
         </div>
         
         <!-- Mobile Virtual Controls -->
