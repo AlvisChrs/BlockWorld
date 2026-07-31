@@ -30,8 +30,8 @@ let isNightTime = false;
 const GRAVITY = 0.55;
 const JUMP_FORCE = -9;
 const MAX_FALL_SPEED = 14;
-const ACCEL = 1.0;
-const MAX_SPEED = 5.5;
+const ACCEL = 0.55;
+const MAX_SPEED = 3.25;
 const FRICTION_NORMAL = 0.72;
 const FRICTION_ICE    = 0.985;
 
@@ -652,7 +652,8 @@ socket.on('door_warped', data => {
 
 socket.on('hp_update', (hp) => { myHp = hp; renderHpHud(hp); });
 
-socket.on('player_died', (id) => {
+socket.on('player_died', (data) => {
+    const id = typeof data === 'string' ? data : data.id;
     if (players[id]) {
         players[id].isDead = true;
         players[id].deathTime = Date.now();

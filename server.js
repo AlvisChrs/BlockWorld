@@ -18,6 +18,11 @@ const HP_REGEN_INTERVAL = 5000;
 const MAX_BUILD_RANGE = 4;
 const MAX_PLAYER_SPEED = 900; // pixels/second; allows normal falling while rejecting teleports
 const MOVE_DISTANCE_TOLERANCE = 48;
+const PLAYER_RESPAWN_DELAY = 3000;
+const MOB_JUMP_FORCE = -5.5;
+const MOB_MAX_JUMP_HEIGHT = BLOCK_SIZE * 1.25;
+const MOB_MAX_COUNT = 2;
+const MOB_SPAWN_INTERVAL = 25000;
 
 // Day / Night Cycle Constants (Total 120s: 60s Day, 60s Night)
 const CYCLE_DURATION = 120;
@@ -119,25 +124,43 @@ let droppedItems = [];
 let mobs = [];
 let nextItemId = 1;
 let nextMobId = 1;
+// Door blocks only store their visual type in `world`, so keep their pair ID separately.
+const doorEndpoints = new Map();
 
 function getBlock(x, y) {
     if (x < 0 || x >= WORLD_WIDTH || y < 0 || y >= WORLD_HEIGHT) return BLOCKS.AIR;
     return world[y][x];
 }
 
-function getAllDoors() {
-    const doors = [];
-    for (let y = 0; y < WORLD_HEIGHT; y++) {
-        for (let x = 0; x < WORLD_WIDTH; x++) {
-            if (world[y][x] === BLOCKS.DOOR) {
-                // Group contiguous vertical door blocks as one door location
-                if (y === 0 || world[y-1][x] !== BLOCKS.DOOR) {
-                    doors.push({ x, y });
-                }
-            }
-        }
+function doorKey(x, y) {
+    return `${x},${y}`;
+}
+
+function assignDoorPair(x, y) {
+    const pairCounts = new Map();
+    for (const door of doorEndpoints.values()) {
+        pairCounts.set(door.pairId, (pairCounts.get(door.pairId) || 0) + 1);
     }
-    return doors;
+    let pairId = 1;
+    while ((pairCounts.get(pairId) || 0) >= 2) pairId++;
+    const door = { x, y, pairId };
+    doorEndpoints.set(doorKey(x, y), door);
+    return door;
+}
+
+function getDoorAtOrNear(x, y) {
+    for (const [dx, dy] of [[0, 0], [0, 1], [0, -1]]) {
+        const door = doorEndpoints.get(doorKey(x + dx, y + dy));
+        if (door) return door;
+    }
+    return null;
+}
+
+function getPairedDoor(sourceDoor) {
+    for (const door of doorEndpoints.values()) {
+        if (door.pairId === sourceDoor.pairId && doorKey(door.x, door.y) !== doorKey(sourceDoor.x, sourceDoor.y)) return door;
+    }
+    return null;
 }
 
 function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
@@ -156,21 +179,28 @@ function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
 }
 
 function handleDeath(p, io, reason) {
-    if (p.hp <= 0) return;
+    // Some callers already reduce HP to zero; `isDead` is the one-time guard.
+    if (!p || p.isDead) return;
     p.hp = 0;
+    p.isDead = true;
+    p.deathSequence = (p.deathSequence || 0) + 1;
     io.to(p.id).emit('hp_update', p.hp);
-    io.emit('player_died', p.id);
+    io.emit('player_died', { id: p.id, reason });
     
     setTimeout(() => {
-        if (players[p.id]) {
-            players[p.id].hp = MAX_HP;
-            players[p.id].x = 10 * BLOCK_SIZE;
-            players[p.id].y = 15 * BLOCK_SIZE;
-            players[p.id].vx = 0;
-            io.to(p.id).emit('respawn', { x: players[p.id].x, y: players[p.id].y, hp: MAX_HP });
-            io.emit('player_moved', players[p.id]);
+        const player = players[p.id];
+        if (player && player.isDead && player.deathSequence === p.deathSequence) {
+            player.hp = MAX_HP;
+            player.x = 10 * BLOCK_SIZE;
+            player.y = 15 * BLOCK_SIZE;
+            player.vx = 0;
+            player.isDead = false;
+            player.lastDamageTime = 0;
+            player.lastMoveAt = Date.now();
+            io.to(p.id).emit('respawn', { x: player.x, y: player.y, hp: MAX_HP });
+            io.emit('player_moved', player);
         }
-    }, 3000);
+    }, PLAYER_RESPAWN_DELAY);
 }
 
 // ─── Day / Night Cycle Timer (120s loop) ──────────────────────────────────────
@@ -264,7 +294,7 @@ setInterval(() => {
 // ─── Ticker 4: Knight Mob Spawner (NIGHT TIME ONLY!) & AI Loop ────────────────
 setInterval(() => {
     const isNight = gameTime >= 60;
-    if (isNight && mobs.length < 4) {
+    if (isNight && mobs.length < MOB_MAX_COUNT) {
         const playerIds = Object.keys(players).filter(id => players[id].hp > 0);
         if (playerIds.length > 0) {
             const randomPlayer = players[playerIds[Math.floor(Math.random() * playerIds.length)]];
@@ -293,7 +323,7 @@ setInterval(() => {
             }
         }
     }
-}, 15000);
+}, MOB_SPAWN_INTERVAL);
 
 // Mob Physics & AI Update (20 FPS)
 setInterval(() => {
@@ -323,7 +353,8 @@ setInterval(() => {
             const frontX = mob.x + (mob.vx > 0 ? BLOCK_SIZE : -4);
             const frontBlock = getBlock(Math.floor(frontX / BLOCK_SIZE), Math.floor((mob.y + 16) / BLOCK_SIZE));
             if (frontBlock !== BLOCKS.AIR && !isBackground(frontBlock) && mob.vy === 0) {
-                mob.vy = -7.5;
+                mob.vy = MOB_JUMP_FORCE;
+                mob.jumpStartY = mob.y;
             }
 
             if (mob.attackCooldown > 0) mob.attackCooldown--;
@@ -343,6 +374,10 @@ setInterval(() => {
         mob.vy = Math.min(mob.vy + 0.5, 12);
         mob.x += mob.vx;
         mob.y += mob.vy;
+        if (mob.jumpStartY !== undefined && mob.y < mob.jumpStartY - MOB_MAX_JUMP_HEIGHT) {
+            mob.y = mob.jumpStartY - MOB_MAX_JUMP_HEIGHT;
+            mob.vy = 0;
+        }
 
         const mobGx = Math.floor((mob.x + 16) / BLOCK_SIZE);
         const mobGy = Math.floor((mob.y + 32) / BLOCK_SIZE);
@@ -350,6 +385,7 @@ setInterval(() => {
         if (bBelow !== BLOCKS.AIR && !isBackground(bBelow)) {
             mob.y = (mobGy - 1) * BLOCK_SIZE;
             mob.vy = 0;
+            delete mob.jumpStartY;
         }
 
         mob.x = Math.max(0, Math.min(mob.x, (WORLD_WIDTH - 1) * BLOCK_SIZE));
@@ -370,6 +406,7 @@ io.on('connection', (socket) => {
         [BLOCKS.GLASS]: 5,
         [BLOCKS.LAVA]: 5,
         [BLOCKS.ICE]: 5,
+        [BLOCKS.SPIKE]: 8,
         [BLOCKS.DOOR]: 4 // Provide doors to test Door Warp!
     };
 
@@ -437,16 +474,16 @@ io.on('connection', (socket) => {
 
         // Check if player is standing in front of a Door block
         if (getBlock(pgx, pgy) === BLOCKS.DOOR || getBlock(pgx, pgy + 1) === BLOCKS.DOOR || getBlock(pgx, pgy - 1) === BLOCKS.DOOR) {
-            const allDoors = getAllDoors();
-            if (allDoors.length < 2) {
-                socket.emit('server_message', '🚪 You need at least 2 Doors placed in the world to warp!');
+            const sourceDoor = getDoorAtOrNear(pgx, pgy);
+            if (!sourceDoor) {
+                socket.emit('server_message', 'This door has no pair ID. Replace it to register a pair.');
                 return;
             }
-
-            // Find current door index and target the next door in sequence
-            const curDoorIdx = allDoors.findIndex(d => Math.abs(d.x - pgx) <= 1 && Math.abs(d.y - pgy) <= 1);
-            const targetIdx = (curDoorIdx + 1) % allDoors.length;
-            const targetDoor = allDoors[targetIdx];
+            const targetDoor = getPairedDoor(sourceDoor);
+            if (!targetDoor) {
+                socket.emit('server_message', `Door ID ${sourceDoor.pairId} needs one matching door.`);
+                return;
+            }
 
             // Emit warp effect particles at current position
             io.emit('door_warped', { x: p.x, y: p.y });
@@ -461,7 +498,7 @@ io.on('connection', (socket) => {
 
             io.to(socket.id).emit('respawn', { x: p.x, y: p.y, hp: p.hp });
             io.emit('player_moved', p);
-            socket.emit('server_message', `🚪 Warped to Door at (${targetDoor.x}, ${targetDoor.y})!`);
+            socket.emit('server_message', `Warped through Door ID ${sourceDoor.pairId}.`);
         }
     });
 
@@ -484,6 +521,7 @@ io.on('connection', (socket) => {
 
             const oldBlock = world[gridY][gridX];
             if (oldBlock !== BLOCKS.AIR) {
+                if (oldBlock === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
                 world[gridY][gridX] = BLOCKS.AIR;
                 io.emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR });
                 spawnDroppedItem(oldBlock, gridX * BLOCK_SIZE + 8, gridY * BLOCK_SIZE + 8, 1);
@@ -507,12 +545,18 @@ io.on('connection', (socket) => {
             }
 
             if (world[gridY][gridX] === BLOCKS.AIR || isBackground(world[gridY][gridX])) {
+                if (world[gridY][gridX] === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
                 world[gridY][gridX] = blockId;
+                let placedDoor = null;
+                if (blockId === BLOCKS.DOOR) placedDoor = assignDoorPair(gridX, gridY);
                 if (!p.isAdmin) {
                     p.inventory[blockId]--;
                     socket.emit('inventory_update', p.inventory);
                 }
                 io.emit('world_update', { gridX, gridY, blockId });
+                if (placedDoor) {
+                    socket.emit('server_message', `Door placed as ID ${placedDoor.pairId}. Place another door to complete this pair.`);
+                }
             }
         }
     });
