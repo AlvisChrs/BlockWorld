@@ -1,90 +1,63 @@
-# BlockWorld (Alpha) 🎮
+# BlockWorld (Alpha)
 
-**BlockWorld** adalah game 2D 2D Multiplayer Sandbox berbasis Web yang terinspirasi dari gabungan mekanik game *Growtopia* dan *Terraria*. Game ini dibangun menggunakan **Node.js**, **Express**, **Socket.IO**, dan **HTML5 Canvas** murni tanpa *framework game engine* berat.
+A 2D multiplayer sandbox web game inspired by mechanics from Growtopia and Terraria. Built from scratch using Node.js, Express, Socket.IO, and HTML5 Canvas.
 
----
+## Features
 
-## ✨ Fitur Utama
+- Procedural World Generation: Natural terrain featuring rolling hills, trees, surface grass, subsurface dirt, and deep stone layers with underground ice and lava pockets.
+- Day and Night Cycle: A 2-minute cycle alternating between day and night with dynamic sky color transitions and celestial rendering.
+- Enemy Mobs & Combat: Knight mobs spawn exclusively at night and attack non-admin players. Daytime causes night mobs to despawn. Weapons include fists, wooden swords, and stone swords.
+- Inventory & Crafting: Tabbed inventory interface with a 5-slot hotbar, crafting system for solid structures and weapons, and physical item drops with proximity pickup.
+- Admin / Moderation Mode: Moderation commands including flight, noclip collision bypass, mob immunity, and unconstrained build range.
 
-- **🌍 Generasi Dunia Alami (Procedural Generation):** Dunia dengan bukit rumput bergelombang, pohon alami, lapisan tanah & batu, serta endapan es & lava di kedalaman tanah.
-- **🌞/🌙 Siklus Siang & Malam (Day/Night Cycle):** Siklus 2 menit (1 menit Siang, 1 menit Malam) dengan efek gradasi langit dinamis, pergerakan Matahari & Bulan, serta bintang berkedip di malam hari.
-- **⚔️ Musuh Knight & Combat System:** 
-  - Prajurit Knight berzirah yang bermunculan khusus saat malam hari.
-  - Sistem bertarung dengan Tangan Kosong (*Fist* - 1 DMG), *Wooden Sword* (3 DMG), dan *Stone Sword* (5 DMG).
-  - Prajurit Knight otomatis terbakar/lenyap saat matahari pagi terbit.
-- **🛠️ Sistem Crafting & Inventory:**
-  - Tas Inventory dengan sistem **Tab** (*Blocks*, *Backgrounds*, *Deadly*, *Weapons*, dan *Crafting*).
-  - Crafting Table untuk merakit bahan (Tembok Padat, Pintu Wood, Senjata).
-  - Hotbar 5 slot di layar bawah.
-- **💎 Item Drop & Auto-Pickup:** Blok yang dihancurkan akan membal di tanah sebelum dipungut saat didekati. Tombol `G` untuk membuang item secara manual.
-- **🛡️ Mode Admin / Moderator:** Kekuatan khusus moderator (`/loginadmin admin123`) yang memberikan fitur Terbang (`/fly`), Bebas Tembus (`/noclip`), Kebal Serangan Musuh, dan Tanpa Limit Jangkauan Bangun.
+## Tech Stack
 
----
+- Backend: Node.js, Express.js
+- Real-time Networking: Socket.IO
+- Frontend: HTML5 Canvas, Vanilla JavaScript, CSS
 
-## 🛠️ Teknologi yang Digunakan
+## Getting Started
 
-- **Backend:** Node.js, Express.js
-- **Real-time Multiplayer:** Socket.IO
-- **Frontend / Graphics:** HTML5 Canvas (Procedural Pixel Art Renderers)
-- **Styling:** Vanilla CSS (Glassmorphism UI)
+### Prerequisites
 
----
+- Node.js (v14 or higher)
 
-## 🚀 Cara Menjalankan Project
+### Installation & Execution
 
-### Persyaratan:
-- [Node.js](https://nodejs.org/) (versi 14 atau yang terbaru)
-
-### Langkah-langkah:
-
-1. **Clone repository ini:**
+1. Clone the repository:
    ```bash
    git clone https://github.com/AlvisChrs/BlockWorld.git
    cd BlockWorld
    ```
 
-2. **Install dependensi Node.js:**
+2. Install dependencies:
    ```bash
    npm install
    ```
 
-3. **Jalankan Server:**
+3. Start the server:
    ```bash
    node server.js
    ```
 
-4. **Buka Game di Browser:**
-   Buka browser favorit Anda lalu akses alamat:
-   ```
-   http://localhost:3000
-   ```
+4. Open `http://localhost:3000` in your web browser.
 
----
+## Controls
 
-## 🎮 Kontrol Game
-
-| Tombol / Aksi | Fungsi |
+| Key / Action | Function |
 |---|---|
-| **W / A / S / D** atau **Panah** | Bergerak & Melompat |
-| **Klik Kiri Mouse** | Menghancurkan Blok / Menyerang Musuh |
-| **Klik Kanan Mouse** | Meletakkan Blok |
-| **1 – 5** | Memilih Slot Hotbar |
-| **E** | Membuka / Menutup Inventory & Crafting Menu |
-| **G** | Membuang (*Drop*) 1 Item dari Slot Aktif |
+| WASD / Arrow Keys | Move & Jump |
+| Left Click | Break Block / Attack Enemy |
+| Right Click | Place Block |
+| 1 - 5 | Select Hotbar Slot |
+| E | Toggle Inventory & Crafting Overlay |
+| G | Drop Selected Item |
 
----
+## Admin Commands
 
-## 🛡️ Commands Admin / Moderator
+Execute via global chat:
 
-Ketik perintah berikut di dalam kotak **Global Chat**:
-
-- `/loginadmin admin123` — Mengaktifkan hak akses Admin/Mod.
-- `/fly` — Mengaktifkan/mematikan mode terbang.
-- `/noclip` — Menembus blok tanpa halangan fisika.
-- `/give <id_item> <jumlah>` — Menambahkan item langsung ke tas (Contoh: `/give 4 10`).
-
----
-
-## 📄 Lisensi
-
-Project ini dikembangkan untuk tujuan pembelajaran dan eksperimen game development berbasis web. Silakan digunakan dan dikembangkan kembali secara bebas.
+- `/loginadmin admin123` - Enable administrator privileges.
+- `/fly` - Toggle flight mode.
+- `/noclip` - Toggle block collision bypass.
+- `/give <item_id> <quantity>` - Add items directly to inventory.
