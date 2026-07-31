@@ -268,7 +268,13 @@ class LofiAudioEngine {
         this.isPlaying = false;
         this.masterGain = null;
         this.rainGain = null;
-        this.chordTimer = null;
+        this.bgmAudio = null;
+        this.currentTrackIndex = 0;
+        this.playlist = [
+            { title: 'A Cup of Tea', src: 'assets/music/a-cup-of-tea.mp3' },
+            { title: 'Cat Caffe', src: 'assets/music/cat-caffe.mp3' },
+            { title: 'Rainy Forest', src: 'assets/music/rainy-forest.mp3' }
+        ];
     }
 
     init() {
@@ -277,11 +283,12 @@ class LofiAudioEngine {
         this.audioCtx = new AudioContext();
 
         this.masterGain = this.audioCtx.createGain();
-        this.masterGain.gain.value = 0.15; // soft volume
+        this.masterGain.gain.value = 0.4;
         this.masterGain.connect(this.audioCtx.destination);
 
         // Rain Noise Generator setup
         this.setupRainNoise();
+        this.setupPlaylist();
     }
 
     setupRainNoise() {
@@ -302,12 +309,32 @@ class LofiAudioEngine {
         filter.frequency.value = 1000;
 
         this.rainGain = this.audioCtx.createGain();
-        this.rainGain.gain.value = 0.05; // soft rain
+        this.rainGain.gain.value = 0.16; // audible, but still behind the music
 
         whiteNoise.connect(filter);
         filter.connect(this.rainGain);
         this.rainGain.connect(this.masterGain);
         whiteNoise.start();
+    }
+
+    setupPlaylist() {
+        this.bgmAudio = new Audio();
+        this.bgmAudio.preload = 'auto';
+        this.bgmAudio.volume = 0.32;
+        this.bgmAudio.addEventListener('ended', () => {
+            if (!this.isPlaying) return;
+            this.currentTrackIndex = (this.currentTrackIndex + 1) % this.playlist.length;
+            this.playCurrentTrack();
+        });
+    }
+
+    playCurrentTrack() {
+        const track = this.playlist[this.currentTrackIndex];
+        this.bgmAudio.src = track.src;
+        this.bgmAudio.play().catch(() => {
+            // A user gesture is required by browsers; the audio button supplies it.
+        });
+        return track;
     }
 
     playLofiChord() {
@@ -337,7 +364,7 @@ class LofiAudioEngine {
 
             // Envelope: soft attack, long decay
             gain.gain.setValueAtTime(0, now);
-            gain.gain.linearRampToValueAtTime(0.04 - (idx * 0.005), now + 0.3);
+            gain.gain.linearRampToValueAtTime(0.11 - (idx * 0.012), now + 0.3);
             gain.gain.exponentialRampToValueAtTime(0.0001, now + 3.8);
 
             osc.connect(filter);
@@ -349,25 +376,26 @@ class LofiAudioEngine {
         });
     }
 
-    toggle() {
+    async toggle() {
         this.init();
         if (this.audioCtx.state === 'suspended') {
-            this.audioCtx.resume();
+            await this.audioCtx.resume();
         }
 
         this.isPlaying = !this.isPlaying;
         const btn = document.getElementById('audioToggleBtn');
 
         if (this.isPlaying) {
+            // Restore the master channel after it was muted by a previous toggle.
+            this.masterGain.gain.setTargetAtTime(0.4, this.audioCtx.currentTime, 0.05);
             btn.classList.add('active');
-            btn.textContent = '🎵 BGM & Rain: ON';
-            this.playLofiChord();
-            this.chordTimer = setInterval(() => this.playLofiChord(), 4000);
+            const track = this.playCurrentTrack();
+            btn.textContent = `🎵 ${track.title} & Rain: ON`;
         } else {
             btn.classList.remove('active');
             btn.textContent = '🎵 BGM & Rain: OFF';
-            if (this.chordTimer) clearInterval(this.chordTimer);
-            if (this.masterGain) this.masterGain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+            this.bgmAudio.pause();
+            if (this.masterGain) this.masterGain.gain.setTargetAtTime(0, this.audioCtx.currentTime, 0.05);
         }
     }
 }
