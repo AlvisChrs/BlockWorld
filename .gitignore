@@ -9,3 +9,7 @@ yarn-error.log*
 # System files
 .DS_Store
 Thumbs.db
+
+# Local runtime data and secrets
+data/
+.env

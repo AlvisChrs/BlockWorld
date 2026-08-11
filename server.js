@@ -1,5 +1,7 @@
 const express = require('express');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { Server } = require('socket.io');
 
 const app = express();
@@ -23,6 +25,10 @@ const MOB_JUMP_FORCE = -5.5;
 const MOB_MAX_JUMP_HEIGHT = BLOCK_SIZE * 1.25;
 const MOB_MAX_COUNT = 2;
 const MOB_SPAWN_INTERVAL = 25000;
+const SAVE_INTERVAL = 30000;
+const DATA_DIR = path.join(__dirname, 'data');
+const WORLD_SAVE_PATH = path.join(DATA_DIR, 'world-state.json');
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 
 // Day / Night Cycle Constants (Total 120s: 60s Day, 60s Night)
 const CYCLE_DURATION = 120;
@@ -63,6 +69,9 @@ const RECIPES = {
 const isBackground = (id) => [
     BLOCKS.AIR, BLOCKS.LAVA, BLOCKS.WALL, BLOCKS.DOOR, BLOCKS.SPIKE
 ].includes(id);
+
+const VALID_BLOCK_IDS = new Set(Object.values(BLOCKS).filter(id => id !== BLOCKS.AIR));
+const VALID_ITEM_IDS = new Set([...VALID_BLOCK_IDS, ...Object.values(ITEMS)]);
 
 // ─── Procedural Natural World Generation ──────────────────────────────────────
 let world = [];
@@ -116,7 +125,6 @@ function generateNaturalWorld() {
         }
     }
 }
-generateNaturalWorld();
 
 // Game State Containers
 const players = {};
@@ -126,6 +134,118 @@ let nextItemId = 1;
 let nextMobId = 1;
 // Door blocks only store their visual type in `world`, so keep their pair ID separately.
 const doorEndpoints = new Map();
+
+function isValidWorldGrid(candidate) {
+    return Array.isArray(candidate) &&
+        candidate.length === WORLD_HEIGHT &&
+        candidate.every(row =>
+            Array.isArray(row) &&
+            row.length === WORLD_WIDTH &&
+            row.every(blockId => Number.isInteger(blockId) && Object.values(BLOCKS).includes(blockId))
+        );
+}
+
+function serializeDoorEndpoints() {
+    return Array.from(doorEndpoints.values());
+}
+
+function restoreDoorEndpoints(savedDoors) {
+    doorEndpoints.clear();
+    if (!Array.isArray(savedDoors)) return;
+
+    for (const door of savedDoors) {
+        if (!door || !Number.isInteger(door.x) || !Number.isInteger(door.y) || !Number.isInteger(door.pairId)) continue;
+        if (door.x < 0 || door.x >= WORLD_WIDTH || door.y < 0 || door.y >= WORLD_HEIGHT) continue;
+        if (world[door.y][door.x] !== BLOCKS.DOOR) continue;
+        doorEndpoints.set(doorKey(door.x, door.y), { x: door.x, y: door.y, pairId: door.pairId });
+    }
+}
+
+function loadWorldState() {
+    try {
+        if (!fs.existsSync(WORLD_SAVE_PATH)) {
+            generateNaturalWorld();
+            return;
+        }
+
+        const saved = JSON.parse(fs.readFileSync(WORLD_SAVE_PATH, 'utf8'));
+        if (!isValidWorldGrid(saved.world)) {
+            console.warn('[save] Invalid saved world shape. Generating a new world.');
+            generateNaturalWorld();
+            return;
+        }
+
+        world = saved.world;
+        droppedItems = Array.isArray(saved.droppedItems) ? saved.droppedItems.filter(item =>
+            item &&
+            Number.isInteger(item.id) &&
+            VALID_ITEM_IDS.has(item.itemType) &&
+            Number.isFinite(item.x) &&
+            Number.isFinite(item.y) &&
+            Number.isInteger(item.amount) &&
+            item.amount > 0
+        ) : [];
+        nextItemId = Number.isInteger(saved.nextItemId) && saved.nextItemId > 0 ? saved.nextItemId : 1;
+        restoreDoorEndpoints(saved.doorEndpoints);
+        console.log(`[save] Loaded world state from ${WORLD_SAVE_PATH}`);
+    } catch (err) {
+        console.error('[save] Failed to load world state. Generating a new world.', err);
+        generateNaturalWorld();
+    }
+}
+
+let saveTimer = null;
+let saveInProgress = false;
+let savePending = false;
+
+function saveWorldState() {
+    if (saveInProgress) {
+        savePending = true;
+        return;
+    }
+
+    saveInProgress = true;
+    try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        const payload = {
+            version: 1,
+            savedAt: new Date().toISOString(),
+            world,
+            doorEndpoints: serializeDoorEndpoints(),
+            droppedItems,
+            nextItemId
+        };
+        fs.writeFileSync(WORLD_SAVE_PATH, JSON.stringify(payload, null, 2));
+    } catch (err) {
+        console.error('[save] Failed to save world state.', err);
+    } finally {
+        saveInProgress = false;
+        if (savePending) {
+            savePending = false;
+            saveWorldState();
+        }
+    }
+}
+
+function scheduleWorldSave() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveWorldState();
+    }, 1000);
+}
+
+function shutdown(signal) {
+    console.log(`[save] ${signal} received. Saving world state before exit.`);
+    if (saveTimer) clearTimeout(saveTimer);
+    saveWorldState();
+    process.exit(0);
+}
+
+loadWorldState();
+setInterval(saveWorldState, SAVE_INTERVAL);
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 function getBlock(x, y) {
     if (x < 0 || x >= WORLD_WIDTH || y < 0 || y >= WORLD_HEIGHT) return BLOCKS.AIR;
@@ -164,7 +284,7 @@ function getPairedDoor(sourceDoor) {
 }
 
 function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
-    if (!itemType || itemType === BLOCKS.AIR) return;
+    if (!VALID_ITEM_IDS.has(itemType) || !Number.isInteger(amount) || amount <= 0) return;
     const item = {
         id: nextItemId++,
         itemType,
@@ -176,6 +296,7 @@ function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
     };
     droppedItems.push(item);
     io.emit('item_spawned', item);
+    scheduleWorldSave();
 }
 
 function handleDeath(p, io, reason) {
@@ -525,6 +646,7 @@ io.on('connection', (socket) => {
                 world[gridY][gridX] = BLOCKS.AIR;
                 io.emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR });
                 spawnDroppedItem(oldBlock, gridX * BLOCK_SIZE + 8, gridY * BLOCK_SIZE + 8, 1);
+                scheduleWorldSave();
             }
         }
     });
@@ -534,8 +656,7 @@ io.on('connection', (socket) => {
         const { gridX, gridY, blockId } = data;
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
-        if (!Number.isInteger(gridX) || !Number.isInteger(gridY) ||
-            !Object.values(BLOCKS).includes(blockId) || blockId === BLOCKS.AIR) return;
+        if (!Number.isInteger(gridX) || !Number.isInteger(gridY) || !VALID_BLOCK_IDS.has(blockId)) return;
 
         if (gridX >= 0 && gridX < WORLD_WIDTH && gridY >= 0 && gridY < WORLD_HEIGHT) {
             if (!checkRange(p, gridX, gridY)) return;
@@ -554,6 +675,7 @@ io.on('connection', (socket) => {
                     socket.emit('inventory_update', p.inventory);
                 }
                 io.emit('world_update', { gridX, gridY, blockId });
+                scheduleWorldSave();
                 if (placedDoor) {
                     socket.emit('server_message', `Door placed as ID ${placedDoor.pairId}. Place another door to complete this pair.`);
                 }
@@ -566,6 +688,8 @@ io.on('connection', (socket) => {
         if (!p || p.hp <= 0) return;
         if (!data) return;
         const { itemType } = data;
+
+        if (!VALID_ITEM_IDS.has(itemType)) return;
 
         if (p.inventory[itemType] && p.inventory[itemType] > 0) {
             p.inventory[itemType]--;
@@ -642,7 +766,15 @@ io.on('connection', (socket) => {
             const args = msg.split(' ');
             const command = args[0].toLowerCase();
 
-            if (command === '/loginadmin' && args[1] === 'admin123') {
+            if (command === '/loginadmin') {
+                if (!ADMIN_PASSWORD) {
+                    socket.emit('server_message', 'Admin login is disabled. Set ADMIN_PASSWORD on the server first.');
+                    return;
+                }
+                if (args[1] !== ADMIN_PASSWORD) {
+                    socket.emit('server_message', 'Invalid admin password.');
+                    return;
+                }
                 player.isAdmin = true;
                 socket.emit('server_message', '🛡️ You are now an ADMIN! Range limit removed & Mob immunity active.');
                 socket.emit('admin_status', { canFly: player.canFly, noclip: player.noclip });
@@ -666,8 +798,16 @@ io.on('connection', (socket) => {
             }
             if (command === '/give') {
                 if (player.isAdmin && args[1] && args[2]) {
-                    const item = parseInt(args[1]);
-                    const qty = parseInt(args[2]);
+                    const item = Number(args[1]);
+                    const qty = Number(args[2]);
+                    if (!Number.isInteger(item) || !VALID_ITEM_IDS.has(item)) {
+                        socket.emit('server_message', 'Invalid item ID.');
+                        return;
+                    }
+                    if (!Number.isInteger(qty) || qty < 1 || qty > 999) {
+                        socket.emit('server_message', 'Quantity must be a whole number from 1 to 999.');
+                        return;
+                    }
                     player.inventory[item] = (player.inventory[item] || 0) + qty;
                     socket.emit('inventory_update', player.inventory);
                     socket.emit('server_message', `🎁 Given ${qty}x item ID ${item}`);

@@ -39,7 +39,7 @@ A 2D multiplayer sandbox web game inspired by mechanics from Growtopia and Terra
 
 3. Start the server:
    ```bash
-   node server.js
+   npm start
    ```
 
 4. Open `http://localhost:3000` in your web browser.
@@ -60,7 +60,14 @@ A 2D multiplayer sandbox web game inspired by mechanics from Growtopia and Terra
 
 Execute via global chat:
 
-- `/loginadmin admin123` - Enable administrator privileges.
+- `/loginadmin <password>` - Enable administrator privileges. Set the password with `ADMIN_PASSWORD`.
 - `/fly` - Toggle flight mode.
 - `/noclip` - Toggle block collision bypass.
 - `/give <item_id> <quantity>` - Add items directly to inventory.
+
+## Server Configuration
+
+- `PORT` - Server port. Defaults to `3000`.
+- `ADMIN_PASSWORD` - Enables the `/loginadmin` command when set.
+
+World state is saved locally to `data/world-state.json` and auto-saved while the server is running.
