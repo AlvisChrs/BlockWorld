@@ -67,20 +67,29 @@ const RECIPES = {
 };
 
 const isBackground = (id) => [
-    BLOCKS.AIR, BLOCKS.LAVA, BLOCKS.WALL, BLOCKS.DOOR, BLOCKS.SPIKE
+    BLOCKS.AIR, BLOCKS.WALL, BLOCKS.DOOR
 ].includes(id);
 
 const VALID_BLOCK_IDS = new Set(Object.values(BLOCKS).filter(id => id !== BLOCKS.AIR));
 const VALID_ITEM_IDS = new Set([...VALID_BLOCK_IDS, ...Object.values(ITEMS)]);
+const BACKGROUND_BLOCK_IDS = new Set([BLOCKS.WALL, BLOCKS.DOOR]);
+const OBJECTIVE_IDS = {
+    COLLECT_WOOD: 'collect_wood',
+    CRAFT_SWORD: 'craft_sword',
+    BUILD_SHELTER: 'build_shelter',
+    SURVIVE_NIGHT: 'survive_night'
+};
 
 // ─── Procedural Natural World Generation ──────────────────────────────────────
 let world = [];
+let backgroundWorld = [];
+function createEmptyGrid(fill = BLOCKS.AIR) {
+    return Array.from({ length: WORLD_HEIGHT }, () => new Array(WORLD_WIDTH).fill(fill));
+}
+
 function generateNaturalWorld() {
-    world = [];
-    for (let y = 0; y < WORLD_HEIGHT; y++) {
-        let row = new Array(WORLD_WIDTH).fill(BLOCKS.AIR);
-        world.push(row);
-    }
+    world = createEmptyGrid();
+    backgroundWorld = createEmptyGrid();
 
     const surfaceHeights = [];
     for (let x = 0; x < WORLD_WIDTH; x++) {
@@ -145,6 +154,19 @@ function isValidWorldGrid(candidate) {
         );
 }
 
+function splitLegacyWorldGrid(savedWorld) {
+    world = createEmptyGrid();
+    backgroundWorld = createEmptyGrid();
+
+    for (let y = 0; y < WORLD_HEIGHT; y++) {
+        for (let x = 0; x < WORLD_WIDTH; x++) {
+            const blockId = savedWorld[y][x];
+            if (BACKGROUND_BLOCK_IDS.has(blockId)) backgroundWorld[y][x] = blockId;
+            else world[y][x] = blockId;
+        }
+    }
+}
+
 function serializeDoorEndpoints() {
     return Array.from(doorEndpoints.values());
 }
@@ -156,7 +178,7 @@ function restoreDoorEndpoints(savedDoors) {
     for (const door of savedDoors) {
         if (!door || !Number.isInteger(door.x) || !Number.isInteger(door.y) || !Number.isInteger(door.pairId)) continue;
         if (door.x < 0 || door.x >= WORLD_WIDTH || door.y < 0 || door.y >= WORLD_HEIGHT) continue;
-        if (world[door.y][door.x] !== BLOCKS.DOOR) continue;
+        if (getBlock(door.x, door.y, 'background') !== BLOCKS.DOOR) continue;
         doorEndpoints.set(doorKey(door.x, door.y), { x: door.x, y: door.y, pairId: door.pairId });
     }
 }
@@ -169,13 +191,16 @@ function loadWorldState() {
         }
 
         const saved = JSON.parse(fs.readFileSync(WORLD_SAVE_PATH, 'utf8'));
-        if (!isValidWorldGrid(saved.world)) {
+        if (isValidWorldGrid(saved.foregroundWorld) && isValidWorldGrid(saved.backgroundWorld)) {
+            world = saved.foregroundWorld;
+            backgroundWorld = saved.backgroundWorld;
+        } else if (isValidWorldGrid(saved.world)) {
+            splitLegacyWorldGrid(saved.world);
+        } else {
             console.warn('[save] Invalid saved world shape. Generating a new world.');
             generateNaturalWorld();
             return;
         }
-
-        world = saved.world;
         droppedItems = Array.isArray(saved.droppedItems) ? saved.droppedItems.filter(item =>
             item &&
             Number.isInteger(item.id) &&
@@ -210,7 +235,8 @@ function saveWorldState() {
         const payload = {
             version: 1,
             savedAt: new Date().toISOString(),
-            world,
+            foregroundWorld: world,
+            backgroundWorld,
             doorEndpoints: serializeDoorEndpoints(),
             droppedItems,
             nextItemId
@@ -247,9 +273,35 @@ setInterval(saveWorldState, SAVE_INTERVAL);
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-function getBlock(x, y) {
+function getBlock(x, y, layer = 'foreground') {
     if (x < 0 || x >= WORLD_WIDTH || y < 0 || y >= WORLD_HEIGHT) return BLOCKS.AIR;
-    return world[y][x];
+    return layer === 'background' ? backgroundWorld[y][x] : world[y][x];
+}
+
+function setBlock(x, y, blockId, layer = 'foreground') {
+    if (layer === 'background') backgroundWorld[y][x] = blockId;
+    else world[y][x] = blockId;
+}
+
+function findSurfaceY(x) {
+    for (let y = 0; y < WORLD_HEIGHT; y++) {
+        if (getBlock(x, y) !== BLOCKS.AIR) return y;
+    }
+    return WORLD_HEIGHT - 1;
+}
+
+function getPlacementLayer(blockId) {
+    return BACKGROUND_BLOCK_IDS.has(blockId) ? 'background' : 'foreground';
+}
+
+function sanitizeUsername(name) {
+    if (typeof name !== 'string') return 'Player';
+    const clean = name.trim().replace(/[^\w \-]/g, '').slice(0, 18);
+    return clean || 'Player';
+}
+
+function fail(socket, message) {
+    socket.emit('action_failed', message);
 }
 
 function doorKey(x, y) {
@@ -335,6 +387,13 @@ setInterval(() => {
         mobs = [];
         io.emit('mobs_update', mobs);
         io.emit('server_message', '🌅 Daylight arrives! All night monsters burn away.');
+        for (const id in players) {
+            const p = players[id];
+            if (p.hp > 0 && !p.isAdmin) {
+                p.objectives[OBJECTIVE_IDS.SURVIVE_NIGHT] = true;
+                io.to(id).emit('objective_event', { id: OBJECTIVE_IDS.SURVIVE_NIGHT });
+            }
+        }
     } else if (gameTime === 60) {
         io.emit('server_message', '🌙 Night falls! Beware of Knights in the dark...');
     }
@@ -388,7 +447,7 @@ setInterval(() => {
 
         const gx = Math.floor(item.x / BLOCK_SIZE);
         const gy = Math.floor((item.y + 12) / BLOCK_SIZE);
-        if (getBlock(gx, gy) !== BLOCKS.AIR && !isBackground(getBlock(gx, gy))) {
+        if (getBlock(gx, gy) !== BLOCKS.AIR) {
             item.y = gy * BLOCK_SIZE - 12;
             item.vy = 0;
         }
@@ -416,7 +475,7 @@ setInterval(() => {
 setInterval(() => {
     const isNight = gameTime >= 60;
     if (isNight && mobs.length < MOB_MAX_COUNT) {
-        const playerIds = Object.keys(players).filter(id => players[id].hp > 0);
+        const playerIds = Object.keys(players).filter(id => players[id].hp > 0 && !players[id].isAdmin);
         if (playerIds.length > 0) {
             const randomPlayer = players[playerIds[Math.floor(Math.random() * playerIds.length)]];
             const spawnDir = Math.random() < 0.5 ? -1 : 1;
@@ -424,9 +483,7 @@ setInterval(() => {
             
             if (spawnGx >= 2 && spawnGx < WORLD_WIDTH - 2) {
                 let spawnGy = 20;
-                for (let y = 0; y < WORLD_HEIGHT; y++) {
-                    if (world[y][spawnGx] !== BLOCKS.AIR) { spawnGy = y - 1; break; }
-                }
+                spawnGy = findSurfaceY(spawnGx) - 1;
 
                 const newMob = {
                     id: nextMobId++,
@@ -473,7 +530,7 @@ setInterval(() => {
 
             const frontX = mob.x + (mob.vx > 0 ? BLOCK_SIZE : -4);
             const frontBlock = getBlock(Math.floor(frontX / BLOCK_SIZE), Math.floor((mob.y + 16) / BLOCK_SIZE));
-            if (frontBlock !== BLOCKS.AIR && !isBackground(frontBlock) && mob.vy === 0) {
+            if (frontBlock !== BLOCKS.AIR && mob.vy === 0) {
                 mob.vy = MOB_JUMP_FORCE;
                 mob.jumpStartY = mob.y;
             }
@@ -503,7 +560,7 @@ setInterval(() => {
         const mobGx = Math.floor((mob.x + 16) / BLOCK_SIZE);
         const mobGy = Math.floor((mob.y + 32) / BLOCK_SIZE);
         const bBelow = getBlock(mobGx, mobGy);
-        if (bBelow !== BLOCKS.AIR && !isBackground(bBelow)) {
+        if (bBelow !== BLOCKS.AIR) {
             mob.y = (mobGy - 1) * BLOCK_SIZE;
             mob.vy = 0;
             delete mob.jumpStartY;
@@ -517,6 +574,7 @@ setInterval(() => {
 // ─── Socket Events ────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
     console.log(`[+] Player connected: ${socket.id}`);
+    const username = sanitizeUsername(socket.handshake.auth?.username);
 
     const starterInventory = {
         [BLOCKS.DIRT]: 20,
@@ -533,6 +591,7 @@ io.on('connection', (socket) => {
 
     players[socket.id] = {
         id: socket.id,
+        username,
         x: 10 * BLOCK_SIZE,
         y: 15 * BLOCK_SIZE,
         vx: 0,
@@ -543,12 +602,17 @@ io.on('connection', (socket) => {
         hp: MAX_HP,
         lastDamageTime: 0,
         lastMoveAt: Date.now(),
-        inventory: starterInventory
+        inventory: starterInventory,
+        objectives: {
+            [OBJECTIVE_IDS.BUILD_SHELTER]: false,
+            [OBJECTIVE_IDS.SURVIVE_NIGHT]: false
+        }
     };
 
     socket.emit('init', {
         id: socket.id,
         world: world,
+        backgroundWorld,
         players: players,
         droppedItems: droppedItems,
         mobs: mobs,
@@ -594,7 +658,7 @@ io.on('connection', (socket) => {
         const pgy = Math.floor((p.y + BLOCK_SIZE / 2) / BLOCK_SIZE);
 
         // Check if player is standing in front of a Door block
-        if (getBlock(pgx, pgy) === BLOCKS.DOOR || getBlock(pgx, pgy + 1) === BLOCKS.DOOR || getBlock(pgx, pgy - 1) === BLOCKS.DOOR) {
+        if (getBlock(pgx, pgy, 'background') === BLOCKS.DOOR || getBlock(pgx, pgy + 1, 'background') === BLOCKS.DOOR || getBlock(pgx, pgy - 1, 'background') === BLOCKS.DOOR) {
             const sourceDoor = getDoorAtOrNear(pgx, pgy);
             if (!sourceDoor) {
                 socket.emit('server_message', 'This door has no pair ID. Replace it to register a pair.');
@@ -638,15 +702,23 @@ io.on('connection', (socket) => {
         if (!Number.isInteger(gridX) || !Number.isInteger(gridY)) return;
 
         if (gridX >= 0 && gridX < WORLD_WIDTH && gridY >= 0 && gridY < WORLD_HEIGHT) {
-            if (!checkRange(p, gridX, gridY)) return;
+            if (!checkRange(p, gridX, gridY)) {
+                fail(socket, 'Too far away to break that block.');
+                return;
+            }
 
-            const oldBlock = world[gridY][gridX];
+            const foregroundBlock = getBlock(gridX, gridY);
+            const backgroundBlock = getBlock(gridX, gridY, 'background');
+            const layer = foregroundBlock !== BLOCKS.AIR ? 'foreground' : 'background';
+            const oldBlock = layer === 'foreground' ? foregroundBlock : backgroundBlock;
             if (oldBlock !== BLOCKS.AIR) {
                 if (oldBlock === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
-                world[gridY][gridX] = BLOCKS.AIR;
-                io.emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR });
+                setBlock(gridX, gridY, BLOCKS.AIR, layer);
+                io.emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR, layer });
                 spawnDroppedItem(oldBlock, gridX * BLOCK_SIZE + 8, gridY * BLOCK_SIZE + 8, 1);
                 scheduleWorldSave();
+            } else {
+                fail(socket, 'There is no block there to break.');
             }
         }
     });
@@ -656,30 +728,47 @@ io.on('connection', (socket) => {
         const { gridX, gridY, blockId } = data;
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
-        if (!Number.isInteger(gridX) || !Number.isInteger(gridY) || !VALID_BLOCK_IDS.has(blockId)) return;
+        if (!Number.isInteger(gridX) || !Number.isInteger(gridY) || !VALID_BLOCK_IDS.has(blockId)) {
+            fail(socket, 'That item cannot be placed.');
+            return;
+        }
 
         if (gridX >= 0 && gridX < WORLD_WIDTH && gridY >= 0 && gridY < WORLD_HEIGHT) {
-            if (!checkRange(p, gridX, gridY)) return;
-
-            if (!p.isAdmin) {
-                if (!p.inventory[blockId] || p.inventory[blockId] <= 0) return;
+            if (!checkRange(p, gridX, gridY)) {
+                fail(socket, 'Too far away to place that block.');
+                return;
             }
 
-            if (world[gridY][gridX] === BLOCKS.AIR || isBackground(world[gridY][gridX])) {
-                if (world[gridY][gridX] === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
-                world[gridY][gridX] = blockId;
+            if (!p.isAdmin) {
+                if (!p.inventory[blockId] || p.inventory[blockId] <= 0) {
+                    fail(socket, `You do not have any ${blockId} left.`);
+                    return;
+                }
+            }
+
+            const layer = getPlacementLayer(blockId);
+            if (getBlock(gridX, gridY, layer) === BLOCKS.AIR) {
                 let placedDoor = null;
                 if (blockId === BLOCKS.DOOR) placedDoor = assignDoorPair(gridX, gridY);
+                setBlock(gridX, gridY, blockId, layer);
                 if (!p.isAdmin) {
                     p.inventory[blockId]--;
                     socket.emit('inventory_update', p.inventory);
                 }
-                io.emit('world_update', { gridX, gridY, blockId });
+                if ([BLOCKS.WOOD, BLOCKS.LEAVES, BLOCKS.WALL, BLOCKS.DOOR, BLOCKS.SOLID_WOOD_WALL, BLOCKS.SOLID_STONE_WALL].includes(blockId)) {
+                    p.objectives[OBJECTIVE_IDS.BUILD_SHELTER] = true;
+                    socket.emit('objective_event', { id: OBJECTIVE_IDS.BUILD_SHELTER });
+                }
+                io.emit('world_update', { gridX, gridY, blockId, layer });
                 scheduleWorldSave();
                 if (placedDoor) {
                     socket.emit('server_message', `Door placed as ID ${placedDoor.pairId}. Place another door to complete this pair.`);
                 }
+            } else {
+                fail(socket, layer === 'background' ? 'There is already a background block there.' : 'That space is already occupied.');
             }
+        } else {
+            fail(socket, 'That position is outside the world.');
         }
     });
 
@@ -719,6 +808,9 @@ io.on('connection', (socket) => {
             }
             p.inventory[recipe.result] = (p.inventory[recipe.result] || 0) + recipe.amount;
             socket.emit('inventory_update', p.inventory);
+            if (recipe.result === ITEMS.WOODEN_SWORD || recipe.result === ITEMS.STONE_SWORD) {
+                socket.emit('objective_event', { id: OBJECTIVE_IDS.CRAFT_SWORD });
+            }
             socket.emit('server_message', `🛠️ Crafted ${recipe.amount}x item!`);
         } else {
             socket.emit('server_message', `❌ Insufficient materials to craft!`);
@@ -777,13 +869,26 @@ io.on('connection', (socket) => {
                 }
                 player.isAdmin = true;
                 socket.emit('server_message', '🛡️ You are now an ADMIN! Range limit removed & Mob immunity active.');
-                socket.emit('admin_status', { canFly: player.canFly, noclip: player.noclip });
+                socket.emit('admin_status', { isAdmin: player.isAdmin, canFly: player.canFly, noclip: player.noclip });
+                return;
+            }
+            if (command === '/logoutadmin') {
+                if (!player.isAdmin) {
+                    socket.emit('server_message', 'You are already a regular player.');
+                    return;
+                }
+                player.isAdmin = false;
+                player.canFly = false;
+                player.noclip = false;
+                socket.emit('admin_status', { isAdmin: player.isAdmin, canFly: player.canFly, noclip: player.noclip });
+                io.emit('player_moved', player);
+                socket.emit('server_message', 'Admin mode disabled. You are now a regular player.');
                 return;
             }
             if (command === '/fly') {
                 if (player.isAdmin) {
                     player.canFly = !player.canFly;
-                    socket.emit('admin_status', { canFly: player.canFly, noclip: player.noclip });
+                    socket.emit('admin_status', { isAdmin: player.isAdmin, canFly: player.canFly, noclip: player.noclip });
                     socket.emit('server_message', `✈️ Fly mode: ${player.canFly ? 'ON' : 'OFF'}`);
                 } else { socket.emit('server_message', '❌ Admin only.'); }
                 return;
@@ -791,7 +896,7 @@ io.on('connection', (socket) => {
             if (command === '/noclip') {
                 if (player.isAdmin) {
                     player.noclip = !player.noclip;
-                    socket.emit('admin_status', { canFly: player.canFly, noclip: player.noclip });
+                    socket.emit('admin_status', { isAdmin: player.isAdmin, canFly: player.canFly, noclip: player.noclip });
                     socket.emit('server_message', `👻 Noclip mode: ${player.noclip ? 'ON' : 'OFF'}`);
                 } else { socket.emit('server_message', '❌ Admin only.'); }
                 return;
@@ -816,7 +921,7 @@ io.on('connection', (socket) => {
             }
         }
 
-        io.emit('chat_message', { id: socket.id, color: player.color, text: msg });
+        io.emit('chat_message', { id: socket.id, username: player.username, color: player.color, text: msg });
     });
 
     socket.on('disconnect', () => {

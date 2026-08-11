@@ -1,4 +1,4 @@
-const socket = io();
+const socket = io({ autoConnect: false });
 
 // Canvas Setup
 const canvas = document.getElementById('gameCanvas');
@@ -14,13 +14,15 @@ resizeCanvas();
 canvas.focus();
 
 // ─── Game State ────────────────────────────────────────────────────────────────
-let world = [], players = {}, droppedItems = [], mobs = [], myId = null;
+let world = [], backgroundWorld = [], players = {}, droppedItems = [], mobs = [], myId = null;
 let WORLD_WIDTH = 0, WORLD_HEIGHT = 0, BLOCK_SIZE = 32, MAX_HP = 20, MAX_BUILD_RANGE = 4;
 const camera = { x: 0, y: 0 };
 let myHp = MAX_HP;
 let canFly = false, noclip = false;
 let isAdmin = false;
 let myInventory = {};
+let hoverTile = null;
+const completedObjectives = new Set();
 
 // Time & Day/Night Cycle State
 let currentGameTime = 0;
@@ -69,6 +71,18 @@ const RECIPES_LIST = [
     { id: 'wooden_sword', name: 'Wooden Sword (3 DMG)', req: '3x Wood', resultId: 101 },
     { id: 'stone_sword', name: 'Stone Sword (5 DMG)', req: '2x Wood + 2x Stone', resultId: 102 }
 ];
+
+const BACKGROUND_BLOCKS = new Set([9, 10]);
+const OBJECTIVES = [
+    { id: 'collect_wood', text: 'Collect 3 Wood', done: () => (myInventory[4] || 0) >= 3 },
+    { id: 'craft_sword', text: 'Craft a Sword', done: () => completedObjectives.has('craft_sword') || (myInventory[101] || 0) > 0 || (myInventory[102] || 0) > 0 },
+    { id: 'build_shelter', text: 'Place a shelter block', done: () => completedObjectives.has('build_shelter') },
+    { id: 'survive_night', text: 'Survive one night', done: () => completedObjectives.has('survive_night') }
+];
+
+function getLayerForBlock(blockId) {
+    return BACKGROUND_BLOCKS.has(blockId) ? 'background' : 'foreground';
+}
 
 // ─── Animation State ───────────────────────────────────────────────────────────
 let playerVelocityX = 0, playerVelocityY = 0;
@@ -404,6 +418,32 @@ const lofiAudio = new LofiAudioEngine();
 document.getElementById('audioToggleBtn').onclick = () => lofiAudio.toggle();
 
 // ─── UI Setup: Hotbar & Inventory ─────────────────────────────────────────────
+const joinOverlay = document.getElementById('joinOverlay');
+const joinForm = document.getElementById('joinForm');
+const usernameInput = document.getElementById('usernameInput');
+
+joinForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const username = usernameInput.value.trim() || 'Player';
+    socket.auth = { username };
+    socket.connect();
+    joinOverlay.classList.add('hidden');
+    canvas.focus();
+});
+
+function renderObjectives() {
+    const list = document.getElementById('objectiveList');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const obj of OBJECTIVES) {
+        const li = document.createElement('li');
+        const done = obj.done();
+        li.className = done ? 'done' : '';
+        li.textContent = `${done ? '✓' : '□'} ${obj.text}`;
+        list.appendChild(li);
+    }
+}
+
 function renderHotbar() {
     const container = document.getElementById('hotbar');
     container.innerHTML = '';
@@ -601,6 +641,7 @@ function renderHpHud(hp) {
 socket.on('init', (data) => {
     myId = data.id;
     world = data.world;
+    backgroundWorld = data.backgroundWorld || Array.from({ length: data.WORLD_HEIGHT }, () => new Array(data.WORLD_WIDTH).fill(0));
     players = data.players;
     droppedItems = data.droppedItems || [];
     mobs = data.mobs || [];
@@ -617,6 +658,7 @@ socket.on('init', (data) => {
     renderHpHud(myHp);
     renderHotbar();
     renderInventoryTab('blocks');
+    renderObjectives();
     requestAnimationFrame(gameLoop);
 });
 
@@ -646,15 +688,27 @@ socket.on('time_sync', data => {
 socket.on('inventory_update', inv => {
     myInventory = inv;
     renderHotbar();
+    renderObjectives();
     const activeTab = document.querySelector('.tab-btn.active')?.getAttribute('data-tab') || 'blocks';
     renderInventoryTab(activeTab);
 });
 
 socket.on('world_update', (data) => {
-    const old = world[data.gridY][data.gridX];
-    world[data.gridY][data.gridX] = data.blockId;
+    const layer = data.layer || 'foreground';
+    const targetWorld = layer === 'background' ? backgroundWorld : world;
+    const old = targetWorld[data.gridY][data.gridX];
+    targetWorld[data.gridY][data.gridX] = data.blockId;
     if (data.blockId === 0 && old !== 0) {
         spawnParticles(data.gridX, data.gridY, BLOCK_PARTICLE_COLORS[old] || '#888');
+    }
+});
+
+socket.on('action_failed', msg => showAction(msg, 1400));
+
+socket.on('objective_event', data => {
+    if (data && data.id) {
+        completedObjectives.add(data.id);
+        renderObjectives();
     }
 });
 
@@ -698,9 +752,10 @@ socket.on('respawn', (d) => {
 });
 
 socket.on('admin_status', (s) => {
-    canFly = s.canFly; noclip = s.noclip;
-    isAdmin = true;
-    document.getElementById('adminBadge').classList.remove('hidden');
+    canFly = !!s.canFly;
+    noclip = !!s.noclip;
+    isAdmin = !!s.isAdmin;
+    document.getElementById('adminBadge').classList.toggle('hidden', !isAdmin);
 });
 
 // ─── Action Indicator ─────────────────────────────────────────────────────────
@@ -746,16 +801,35 @@ canvas.addEventListener('mousedown', e => {
     handleMouseAction(e);
 });
 canvas.addEventListener('mouseup', () => { isMouseDown = false; mouseButton = -1; });
-canvas.addEventListener('mousemove', e => { if (isMouseDown) handleMouseAction(e); });
+canvas.addEventListener('mousemove', e => {
+    updateHoverTile(e);
+    if (isMouseDown) handleMouseAction(e);
+});
+canvas.addEventListener('mouseleave', () => { hoverTile = null; });
+
+function getMouseWorldTile(e) {
+    const rect = canvas.getBoundingClientRect();
+    const worldX = (e.clientX - rect.left) * (canvas.width / rect.width) + camera.x;
+    const worldY = (e.clientY - rect.top) * (canvas.height / rect.height) + camera.y;
+    return {
+        worldX,
+        worldY,
+        gridX: Math.floor(worldX / BLOCK_SIZE),
+        gridY: Math.floor(worldY / BLOCK_SIZE)
+    };
+}
+
+function updateHoverTile(e) {
+    const tile = getMouseWorldTile(e);
+    hoverTile = { gridX: tile.gridX, gridY: tile.gridY };
+}
 
 function handleMouseAction(e) {
     if (!players[myId]) return;
     const p = players[myId];
     if (p.isDead) return;
 
-    const rect = canvas.getBoundingClientRect();
-    const worldX = (e.clientX - rect.left) * (canvas.width / rect.width) + camera.x;
-    const worldY = (e.clientY - rect.top) * (canvas.height / rect.height) + camera.y;
+    const { worldX, worldY, gridX, gridY } = getMouseWorldTile(e);
 
     if (mouseButton === 0) {
         for (let mob of mobs) {
@@ -767,11 +841,11 @@ function handleMouseAction(e) {
         }
     }
 
-    const gridX = Math.floor(worldX / BLOCK_SIZE);
-    const gridY = Math.floor(worldY / BLOCK_SIZE);
-
     const px = p.x / BLOCK_SIZE, py = p.y / BLOCK_SIZE;
-    if (!isAdmin && Math.hypot(px - gridX, py - gridY) > MAX_BUILD_RANGE) return;
+    if (!isAdmin && Math.hypot(px - gridX, py - gridY) > MAX_BUILD_RANGE) {
+        showAction('Too far away.', 900);
+        return;
+    }
 
     const now = Date.now();
     if (now - lastBreakTime < 120) return;
@@ -781,6 +855,10 @@ function handleMouseAction(e) {
         socket.emit('break_block', { gridX, gridY });
         actionAnim = 'break'; actionAnimTimer = 10;
     } else if (mouseButton === 2) {
+        if (selectedBlockId === 101 || selectedBlockId === 102) {
+            showAction('Use swords to attack enemies.', 1000);
+            return;
+        }
         socket.emit('place_block', { gridX, gridY, blockId: selectedBlockId });
         actionAnim = 'place'; actionAnimTimer = 10;
     }
@@ -792,6 +870,12 @@ function getBlockAt(px, py) {
     const gx = Math.floor(px / BLOCK_SIZE), gy = Math.floor(py / BLOCK_SIZE);
     if (gx < 0 || gx >= WORLD_WIDTH || gy < 0 || gy >= WORLD_HEIGHT) return 1;
     return world[gy][gx];
+}
+
+function getBackgroundBlockAt(px, py) {
+    const gx = Math.floor(px / BLOCK_SIZE), gy = Math.floor(py / BLOCK_SIZE);
+    if (gx < 0 || gx >= WORLD_WIDTH || gy < 0 || gy >= WORLD_HEIGHT) return 0;
+    return backgroundWorld[gy][gx];
 }
 function solid(id) {
     return [1, 2, 3, 4, 5, 8, 12, 13].includes(id);
@@ -809,8 +893,8 @@ function updatePhysics() {
     // Check if player is standing on/in a Door block
     const pgx = Math.floor((p.x + BLOCK_SIZE / 2) / BLOCK_SIZE);
     const pgy = Math.floor((p.y + BLOCK_SIZE / 2) / BLOCK_SIZE);
-    const blockStanding = getBlockAt(p.x + BLOCK_SIZE / 2, p.y + BLOCK_SIZE / 2);
-    const blockFoot = getBlockAt(p.x + BLOCK_SIZE / 2, p.y + BLOCK_SIZE - 4);
+    const blockStanding = getBackgroundBlockAt(p.x + BLOCK_SIZE / 2, p.y + BLOCK_SIZE / 2);
+    const blockFoot = getBackgroundBlockAt(p.x + BLOCK_SIZE / 2, p.y + BLOCK_SIZE - 4);
     standingOnDoor = blockStanding === 10 || blockFoot === 10;
 
     const promptEl = document.getElementById('doorPrompt');
@@ -953,9 +1037,28 @@ function render() {
 
     for (let y = startY; y < endY; y++) {
         for (let x = startX; x < endX; x++) {
+            const bg = backgroundWorld[y]?.[x] || 0;
+            if (bg !== 0) {
+                ctx.globalAlpha = 0.55;
+                drawBlock(ctx, bg, x * BLOCK_SIZE - camera.x, y * BLOCK_SIZE - camera.y, BLOCK_SIZE, t);
+                ctx.globalAlpha = 1;
+            }
             const bid = world[y][x];
             if (bid !== 0) drawBlock(ctx, bid, x * BLOCK_SIZE - camera.x, y * BLOCK_SIZE - camera.y, BLOCK_SIZE, t);
         }
+    }
+
+    if (hoverTile && hoverTile.gridX >= 0 && hoverTile.gridX < WORLD_WIDTH && hoverTile.gridY >= 0 && hoverTile.gridY < WORLD_HEIGHT) {
+        const sx = hoverTile.gridX * BLOCK_SIZE - camera.x;
+        const sy = hoverTile.gridY * BLOCK_SIZE - camera.y;
+        const layer = getLayerForBlock(selectedBlockId);
+        const target = layer === 'background' ? backgroundWorld : world;
+        const occupied = target[hoverTile.gridY]?.[hoverTile.gridX] !== 0;
+        ctx.save();
+        ctx.strokeStyle = occupied ? 'rgba(248,113,113,0.95)' : 'rgba(96,165,250,0.95)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx + 1, sy + 1, BLOCK_SIZE - 2, BLOCK_SIZE - 2);
+        ctx.restore();
     }
 
     for (const item of droppedItems) {
@@ -1007,6 +1110,14 @@ function render() {
             drawCharacter(ctx, BLOCK_SIZE, vx, id === myId ? playerVelocityY : 0, id === myId ? isGrounded : true, actionAnim, actionAnimTimer, id === myId);
         }
         ctx.restore();
+
+        if (!p.isDead) {
+            ctx.fillStyle = id === myId ? '#bfdbfe' : '#e5e7eb';
+            ctx.font = '600 11px Outfit';
+            ctx.textAlign = 'center';
+            ctx.fillText(p.username || 'Player', sx + BLOCK_SIZE / 2, sy - 6);
+            ctx.textAlign = 'left';
+        }
     }
 
     if (onIce) {
@@ -1034,7 +1145,7 @@ socket.on('chat_message', msg => {
     const name = document.createElement('span');
     name.style.color = msg.color;
     name.style.fontWeight = 'bold';
-    name.textContent = 'Player:';
+    name.textContent = `${msg.username || 'Player'}:`;
     li.append(name, ` ${msg.text}`);
     chatMessages.appendChild(li);
     chatMessages.scrollTop = chatMessages.scrollHeight;

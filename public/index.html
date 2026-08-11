@@ -11,6 +11,14 @@
     <div class="app-background"></div>
     
     <div class="main-container">
+        <div class="join-overlay" id="joinOverlay">
+            <form class="join-window" id="joinForm">
+                <h2>Join BlockWorld</h2>
+                <input id="usernameInput" maxlength="18" autocomplete="off" placeholder="Your name" />
+                <button type="submit">Join</button>
+            </form>
+        </div>
+
         <div class="header-glass">
             <h1>BlockWorld <span class="badge">Alpha</span></h1>
             <div class="header-right">
@@ -32,6 +40,11 @@
                 
                 <!-- HUD: Action indicator -->
                 <div class="action-indicator hidden" id="actionIndicator"></div>
+
+                <div class="objective-panel" id="objectivePanel">
+                    <div class="objective-title">Objectives</div>
+                    <ul id="objectiveList"></ul>
+                </div>
 
                 <!-- HUD: Door Prompt -->
                 <div class="door-prompt hidden" id="doorPrompt">🚪 Press W to Enter Door</div>

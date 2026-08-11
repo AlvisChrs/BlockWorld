@@ -36,6 +36,54 @@ body {
     gap: 12px;
 }
 
+.join-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(5, 8, 16, 0.88);
+    backdrop-filter: blur(10px);
+}
+
+.join-overlay.hidden { display: none; }
+
+.join-window {
+    width: min(360px, calc(100vw - 32px));
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 14px 40px rgba(0,0,0,0.55);
+}
+
+.join-window h2 { font-size: 1.15rem; }
+
+.join-window input {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.14);
+    color: white;
+    border-radius: 8px;
+    padding: 10px 12px;
+    outline: none;
+}
+
+.join-window input:focus { border-color: var(--accent); }
+
+.join-window button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
 /* Header */
 .header-glass {
     background: var(--glass-bg);
@@ -167,6 +215,44 @@ canvas {
     pointer-events: none;
     transition: opacity 0.3s;
     z-index: 10;
+}
+
+.objective-panel {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 10;
+    width: 190px;
+    background: rgba(0,0,0,0.5);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px;
+    padding: 8px 10px;
+    backdrop-filter: blur(4px);
+}
+
+.objective-title {
+    font-size: 0.7rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+}
+
+#objectiveList {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+#objectiveList li {
+    font-size: 0.75rem;
+    color: #cbd5e1;
+}
+
+#objectiveList li.done {
+    color: #86efac;
+    text-decoration: line-through;
 }
 
 /* Door prompt */
