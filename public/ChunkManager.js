@@ -1,3 +1,5 @@
+// Client: chunk loader & cache
+// Responsible for storing chunks sent by server and providing block lookups
 /**
  * Client-side Chunk Manager - Manages chunks received from server
  */

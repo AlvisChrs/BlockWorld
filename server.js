@@ -149,6 +149,40 @@ const doorEndpoints = new Map();
 // Chunk Manager for bandwidth optimization
 let chunkManager = null;
 
+// Spatial partitioning helpers
+const DEFAULT_VIEW_RADIUS = CHUNK_SIZE * BLOCK_SIZE * 1.5; // pixels
+function squared(v){ return v*v; }
+
+function sendToNearbyPlayers(event, payload, x, y, radius = DEFAULT_VIEW_RADIUS) {
+    const r2 = radius * radius;
+    for (const id in players) {
+        const p = players[id];
+        if (!p) continue;
+        const dx = p.x - x;
+        const dy = p.y - y;
+        if (dx*dx + dy*dy <= r2) {
+            io.to(id).emit(event, payload);
+        }
+    }
+}
+
+function sendMobsUpdateNearby() {
+    // For each player, send only nearby mobs to reduce bandwidth
+    const radius = DEFAULT_VIEW_RADIUS;
+    const r2 = radius * radius;
+    for (const id in players) {
+        const p = players[id];
+        if (!p) continue;
+        const nearby = [];
+        for (const m of mobs) {
+            const dx = (m.x || 0) - p.x;
+            const dy = (m.y || 0) - p.y;
+            if (dx*dx + dy*dy <= r2) nearby.push(m);
+        }
+        io.to(id).emit('mobs_update', nearby);
+    }
+}
+
 function isValidWorldGrid(candidate) {
     return Array.isArray(candidate) &&
         candidate.length === WORLD_HEIGHT &&
@@ -360,7 +394,7 @@ function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
         spawnTime: Date.now()
     };
     droppedItems.push(item);
-    io.emit('item_spawned', item);
+    sendToNearbyPlayers('item_spawned', item, item.x, item.y);
     scheduleWorldSave();
 }
 
@@ -371,7 +405,7 @@ function handleDeath(p, io, reason) {
     p.isDead = true;
     p.deathSequence = (p.deathSequence || 0) + 1;
     io.to(p.id).emit('hp_update', p.hp);
-    io.emit('player_died', { id: p.id, reason });
+    sendToNearbyPlayers('player_died', { id: p.id, reason }, p.x, p.y);
     
     setTimeout(() => {
         const player = players[p.id];
@@ -384,7 +418,7 @@ function handleDeath(p, io, reason) {
             player.lastDamageTime = 0;
             player.lastMoveAt = Date.now();
             io.to(p.id).emit('respawn', { x: player.x, y: player.y, hp: MAX_HP });
-            io.emit('player_moved', player);
+            sendToNearbyPlayers('player_moved', player, player.x, player.y);
         }
     }, PLAYER_RESPAWN_DELAY);
 }
@@ -398,7 +432,7 @@ setInterval(() => {
 
     if (gameTime === 0 && mobs.length > 0) {
         mobs = [];
-        io.emit('mobs_update', mobs);
+        sendMobsUpdateNearby();
         io.emit('server_message', '🌅 Daylight arrives! All night monsters burn away.');
         for (const id in players) {
             const p = players[id];
@@ -475,7 +509,7 @@ setInterval(() => {
                 if (dist < 40) {
                     p.inventory[item.itemType] = (p.inventory[item.itemType] || 0) + item.amount;
                     io.to(id).emit('inventory_update', p.inventory);
-                    io.emit('item_picked_up', { itemId: item.id, playerId: id });
+                    sendToNearbyPlayers('item_picked_up', { itemId: item.id, playerId: id }, item.x, item.y);
                     droppedItems.splice(i, 1);
                     break;
                 }
@@ -510,7 +544,7 @@ setInterval(() => {
                     facingRight: true
                 };
                 mobs.push(newMob);
-                io.emit('mob_spawned', newMob);
+                sendToNearbyPlayers('mob_spawned', newMob, newMob.x, newMob.y);
             }
         }
     }
@@ -554,7 +588,7 @@ setInterval(() => {
                 closestPlayer.hp = Math.max(0, closestPlayer.hp - 2);
                 closestPlayer.lastDamageTime = Date.now();
                 io.to(closestPlayer.id).emit('hp_update', closestPlayer.hp);
-                io.emit('mob_attack', { mobId: mob.id, targetId: closestPlayer.id, damage: 2 });
+                sendToNearbyPlayers('mob_attack', { mobId: mob.id, targetId: closestPlayer.id, damage: 2 }, mob.x, mob.y);
                 if (closestPlayer.hp === 0) handleDeath(closestPlayer, io, 'knight');
             }
         } else {
@@ -581,7 +615,8 @@ setInterval(() => {
 
         mob.x = Math.max(0, Math.min(mob.x, (WORLD_WIDTH - 1) * BLOCK_SIZE));
     }
-    io.emit('mobs_update', mobs);
+    // Send per-player nearby mob updates to reduce bandwidth
+    sendMobsUpdateNearby();
 }, 50);
 
 // ─── Socket Events ────────────────────────────────────────────────────────────
@@ -720,7 +755,7 @@ io.on('connection', (socket) => {
             }
 
             // Emit warp effect particles at current position
-            io.emit('door_warped', { x: p.x, y: p.y });
+            sendToNearbyPlayers('door_warped', { x: p.x, y: p.y }, p.x, p.y);
 
             // Teleport player to target door
             p.x = targetDoor.x * BLOCK_SIZE;
@@ -728,10 +763,10 @@ io.on('connection', (socket) => {
             p.lastMoveAt = Date.now();
 
             // Emit warp effect particles at destination
-            io.emit('door_warped', { x: p.x, y: p.y });
+            sendToNearbyPlayers('door_warped', { x: p.x, y: p.y }, p.x, p.y);
 
             io.to(socket.id).emit('respawn', { x: p.x, y: p.y, hp: p.hp });
-            io.emit('player_moved', p);
+            sendToNearbyPlayers('player_moved', p, p.x, p.y);
             socket.emit('server_message', `Warped through Door ID ${sourceDoor.pairId}.`);
         }
     });
@@ -763,7 +798,7 @@ io.on('connection', (socket) => {
             if (oldBlock !== BLOCKS.AIR) {
                 if (oldBlock === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
                 setBlock(gridX, gridY, BLOCKS.AIR, layer);
-                io.emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR, layer });
+                sendToNearbyPlayers('world_update', { gridX, gridY, blockId: BLOCKS.AIR, layer }, gridX * BLOCK_SIZE, gridY * BLOCK_SIZE);
                 spawnDroppedItem(oldBlock, gridX * BLOCK_SIZE + 8, gridY * BLOCK_SIZE + 8, 1);
                 scheduleWorldSave();
             } else {
@@ -808,7 +843,7 @@ io.on('connection', (socket) => {
                     p.objectives[OBJECTIVE_IDS.BUILD_SHELTER] = true;
                     socket.emit('objective_event', { id: OBJECTIVE_IDS.BUILD_SHELTER });
                 }
-                io.emit('world_update', { gridX, gridY, blockId, layer });
+                sendToNearbyPlayers('world_update', { gridX, gridY, blockId, layer }, gridX * BLOCK_SIZE, gridY * BLOCK_SIZE);
                 scheduleWorldSave();
                 if (placedDoor) {
                     socket.emit('server_message', `Door placed as ID ${placedDoor.pairId}. Place another door to complete this pair.`);
@@ -887,13 +922,13 @@ io.on('connection', (socket) => {
         mob.vx = (mob.x > p.x ? 1 : -1) * 5;
         mob.vy = -3;
 
-        io.emit('mob_damaged', { mobId: mob.id, hp: mob.hp, maxHp: mob.maxHp, damage });
+        sendToNearbyPlayers('mob_damaged', { mobId: mob.id, hp: mob.hp, maxHp: mob.maxHp, damage }, mob.x, mob.y);
 
         if (mob.hp <= 0) {
             spawnDroppedItem(BLOCKS.STONE, mob.x, mob.y, 2);
             spawnDroppedItem(BLOCKS.WOOD, mob.x + 8, mob.y, 1);
             mobs.splice(mobIndex, 1);
-            io.emit('mob_died', { mobId: mob.id });
+            sendToNearbyPlayers('mob_died', { mobId: mob.id }, mob.x, mob.y);
         }
     });
 
@@ -930,7 +965,7 @@ io.on('connection', (socket) => {
                 player.canFly = false;
                 player.noclip = false;
                 socket.emit('admin_status', { isAdmin: player.isAdmin, canFly: player.canFly, noclip: player.noclip });
-                io.emit('player_moved', player);
+                sendToNearbyPlayers('player_moved', player, player.x, player.y);
                 socket.emit('server_message', 'Admin mode disabled. You are now a regular player.');
                 return;
             }
