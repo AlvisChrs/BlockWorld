@@ -667,7 +667,10 @@ io.on('connection', (socket) => {
     for (const chunk of visibleChunks) {
         serializedChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'foreground'));
         serializedChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'background'));
-        player.visibleChunks.add(`${chunk.chunkX},${chunk.chunkY}`);
+        const key = `${chunk.chunkX},${chunk.chunkY}`;
+        player.visibleChunks.add(key);
+        // Subscribe socket to the chunk room for server-side area broadcasts
+        socket.join(`chunk:${key}`);
     }
 
     socket.emit('init', {
@@ -725,6 +728,12 @@ io.on('connection', (socket) => {
                 newChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'background'));
             }
         }
+
+        // Join newly visible chunk rooms and leave ones no longer visible
+        const toJoin = [...newChunkKeys].filter(k => !p.visibleChunks.has(k));
+        const toLeave = [...p.visibleChunks].filter(k => !newChunkKeys.has(k));
+        for (const k of toJoin) socket.join(`chunk:${k}`);
+        for (const k of toLeave) socket.leave(`chunk:${k}`);
 
         if (newChunks.length > 0) {
             socket.emit('chunks_loaded', { chunks: newChunks });
@@ -798,7 +807,14 @@ io.on('connection', (socket) => {
             if (oldBlock !== BLOCKS.AIR) {
                 if (oldBlock === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
                 setBlock(gridX, gridY, BLOCKS.AIR, layer);
-                sendToNearbyPlayers('world_update', { gridX, gridY, blockId: BLOCKS.AIR, layer }, gridX * BLOCK_SIZE, gridY * BLOCK_SIZE);
+                const roomKey = `chunk:${Math.floor(gridX / CHUNK_SIZE)},${Math.floor(gridY / CHUNK_SIZE)}`;
+                io.to(roomKey).emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR, layer });
+                (async () => {
+                    try {
+                        const sockets = await io.in(roomKey).allSockets();
+                        console.log(`[room] world_update (break) emitted to ${sockets.size} sockets in ${roomKey}:`, Array.from(sockets).slice(0, 10));
+                    } catch (e) { console.error('[room] failed to list sockets', e); }
+                })();
                 spawnDroppedItem(oldBlock, gridX * BLOCK_SIZE + 8, gridY * BLOCK_SIZE + 8, 1);
                 scheduleWorldSave();
             } else {
@@ -843,7 +859,14 @@ io.on('connection', (socket) => {
                     p.objectives[OBJECTIVE_IDS.BUILD_SHELTER] = true;
                     socket.emit('objective_event', { id: OBJECTIVE_IDS.BUILD_SHELTER });
                 }
-                sendToNearbyPlayers('world_update', { gridX, gridY, blockId, layer }, gridX * BLOCK_SIZE, gridY * BLOCK_SIZE);
+                const roomKey = `chunk:${Math.floor(gridX / CHUNK_SIZE)},${Math.floor(gridY / CHUNK_SIZE)}`;
+                io.to(roomKey).emit('world_update', { gridX, gridY, blockId, layer });
+                (async () => {
+                    try {
+                        const sockets = await io.in(roomKey).allSockets();
+                        console.log(`[room] world_update (place) emitted to ${sockets.size} sockets in ${roomKey}:`, Array.from(sockets).slice(0, 10));
+                    } catch (e) { console.error('[room] failed to list sockets', e); }
+                })();
                 scheduleWorldSave();
                 if (placedDoor) {
                     socket.emit('server_message', `Door placed as ID ${placedDoor.pairId}. Place another door to complete this pair.`);
