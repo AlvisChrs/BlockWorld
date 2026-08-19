@@ -14,8 +14,9 @@ resizeCanvas();
 canvas.focus();
 
 // ─── Game State ────────────────────────────────────────────────────────────────
-let world = [], backgroundWorld = [], players = {}, droppedItems = [], mobs = [], myId = null;
-let WORLD_WIDTH = 0, WORLD_HEIGHT = 0, BLOCK_SIZE = 32, MAX_HP = 20, MAX_BUILD_RANGE = 4;
+let chunkManager = new ClientChunkManager();
+let players = {}, droppedItems = [], mobs = [], myId = null;
+let WORLD_WIDTH = 0, WORLD_HEIGHT = 0, BLOCK_SIZE = 32, CHUNK_SIZE = 32, MAX_HP = 20, MAX_BUILD_RANGE = 4;
 const camera = { x: 0, y: 0 };
 let myHp = MAX_HP;
 let canFly = false, noclip = false;
@@ -640,20 +641,25 @@ function renderHpHud(hp) {
 // ─── Socket Events ────────────────────────────────────────────────────────────
 socket.on('init', (data) => {
     myId = data.id;
-    world = data.world;
-    backgroundWorld = data.backgroundWorld || Array.from({ length: data.WORLD_HEIGHT }, () => new Array(data.WORLD_WIDTH).fill(0));
     players = data.players;
     droppedItems = data.droppedItems || [];
     mobs = data.mobs || [];
     WORLD_WIDTH = data.WORLD_WIDTH;
     WORLD_HEIGHT = data.WORLD_HEIGHT;
     BLOCK_SIZE = data.BLOCK_SIZE;
+    CHUNK_SIZE = data.CHUNK_SIZE || 32;
     MAX_HP = data.MAX_HP;
     MAX_BUILD_RANGE = data.MAX_BUILD_RANGE;
     myHp = MAX_HP;
     myInventory = data.inventory || {};
     currentGameTime = data.gameTime || 0;
     isNightTime = data.isNight || false;
+    
+    // Load initial chunks
+    if (data.chunks && Array.isArray(data.chunks)) {
+        chunkManager.loadChunks(data.chunks);
+    }
+    
     resizeCanvas();
     renderHpHud(myHp);
     renderHotbar();
@@ -665,6 +671,12 @@ socket.on('init', (data) => {
 socket.on('player_joined', p => { players[p.id] = p; });
 socket.on('player_left', id => { delete players[id]; });
 socket.on('player_moved', p => { if (players[p.id]) Object.assign(players[p.id], p); });
+
+socket.on('chunks_loaded', (data) => {
+    if (data.chunks && Array.isArray(data.chunks)) {
+        chunkManager.loadChunks(data.chunks);
+    }
+});
 
 socket.on('time_sync', data => {
     currentGameTime = data.gameTime;
@@ -695,9 +707,8 @@ socket.on('inventory_update', inv => {
 
 socket.on('world_update', (data) => {
     const layer = data.layer || 'foreground';
-    const targetWorld = layer === 'background' ? backgroundWorld : world;
-    const old = targetWorld[data.gridY][data.gridX];
-    targetWorld[data.gridY][data.gridX] = data.blockId;
+    const old = chunkManager.getBlock(data.gridX, data.gridY, layer);
+    chunkManager.setBlock(data.gridX, data.gridY, data.blockId, layer);
     if (data.blockId === 0 && old !== 0) {
         spawnParticles(data.gridX, data.gridY, BLOCK_PARTICLE_COLORS[old] || '#888');
     }
@@ -869,13 +880,13 @@ canvas.addEventListener('contextmenu', e => e.preventDefault());
 function getBlockAt(px, py) {
     const gx = Math.floor(px / BLOCK_SIZE), gy = Math.floor(py / BLOCK_SIZE);
     if (gx < 0 || gx >= WORLD_WIDTH || gy < 0 || gy >= WORLD_HEIGHT) return 1;
-    return world[gy][gx];
+    return chunkManager.getBlock(gx, gy, 'foreground');
 }
 
 function getBackgroundBlockAt(px, py) {
     const gx = Math.floor(px / BLOCK_SIZE), gy = Math.floor(py / BLOCK_SIZE);
     if (gx < 0 || gx >= WORLD_WIDTH || gy < 0 || gy >= WORLD_HEIGHT) return 0;
-    return backgroundWorld[gy][gx];
+    return chunkManager.getBlock(gx, gy, 'background');
 }
 function solid(id) {
     return [1, 2, 3, 4, 5, 8, 12, 13].includes(id);
@@ -1037,13 +1048,13 @@ function render() {
 
     for (let y = startY; y < endY; y++) {
         for (let x = startX; x < endX; x++) {
-            const bg = backgroundWorld[y]?.[x] || 0;
+            const bg = chunkManager.getBlock(x, y, 'background');
             if (bg !== 0) {
                 ctx.globalAlpha = 0.55;
                 drawBlock(ctx, bg, x * BLOCK_SIZE - camera.x, y * BLOCK_SIZE - camera.y, BLOCK_SIZE, t);
                 ctx.globalAlpha = 1;
             }
-            const bid = world[y][x];
+            const bid = chunkManager.getBlock(x, y, 'foreground');
             if (bid !== 0) drawBlock(ctx, bid, x * BLOCK_SIZE - camera.x, y * BLOCK_SIZE - camera.y, BLOCK_SIZE, t);
         }
     }
@@ -1052,8 +1063,7 @@ function render() {
         const sx = hoverTile.gridX * BLOCK_SIZE - camera.x;
         const sy = hoverTile.gridY * BLOCK_SIZE - camera.y;
         const layer = getLayerForBlock(selectedBlockId);
-        const target = layer === 'background' ? backgroundWorld : world;
-        const occupied = target[hoverTile.gridY]?.[hoverTile.gridX] !== 0;
+        const occupied = chunkManager.getBlock(hoverTile.gridX, hoverTile.gridY, layer) !== 0;
         ctx.save();
         ctx.strokeStyle = occupied ? 'rgba(248,113,113,0.95)' : 'rgba(96,165,250,0.95)';
         ctx.lineWidth = 2;

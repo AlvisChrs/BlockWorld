@@ -3,6 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { Server } = require('socket.io');
+const ChunkManager = require('./world/ChunkManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -14,6 +15,7 @@ app.use(express.static('public'));
 const WORLD_WIDTH = 100;
 const WORLD_HEIGHT = 50;
 const BLOCK_SIZE = 32;
+const CHUNK_SIZE = 32; // Tiles per chunk (32x32 tiles)
 const MAX_HP = 20;
 const LAVA_DAMAGE_INTERVAL = 500;
 const HP_REGEN_INTERVAL = 5000;
@@ -144,6 +146,9 @@ let nextMobId = 1;
 // Door blocks only store their visual type in `world`, so keep their pair ID separately.
 const doorEndpoints = new Map();
 
+// Chunk Manager for bandwidth optimization
+let chunkManager = null;
+
 function isValidWorldGrid(candidate) {
     return Array.isArray(candidate) &&
         candidate.length === WORLD_HEIGHT &&
@@ -269,18 +274,26 @@ function shutdown(signal) {
 }
 
 loadWorldState();
+
+// Initialize chunk manager from loaded world
+chunkManager = new ChunkManager(WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE);
+chunkManager.initializeFromWorld(world, backgroundWorld);
+console.log(`[chunks] Initialized ${chunkManager.chunksX}x${chunkManager.chunksY} chunk grid`);
+
 setInterval(saveWorldState, SAVE_INTERVAL);
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 function getBlock(x, y, layer = 'foreground') {
-    if (x < 0 || x >= WORLD_WIDTH || y < 0 || y >= WORLD_HEIGHT) return BLOCKS.AIR;
-    return layer === 'background' ? backgroundWorld[y][x] : world[y][x];
+    return chunkManager.getBlock(x, y, layer);
 }
 
 function setBlock(x, y, blockId, layer = 'foreground') {
+    const success = chunkManager.setBlock(x, y, blockId, layer);
+    // Also update the grid for backward compatibility
     if (layer === 'background') backgroundWorld[y][x] = blockId;
     else world[y][x] = blockId;
+    return success;
 }
 
 function findSurfaceY(x) {
@@ -606,19 +619,32 @@ io.on('connection', (socket) => {
         objectives: {
             [OBJECTIVE_IDS.BUILD_SHELTER]: false,
             [OBJECTIVE_IDS.SURVIVE_NIGHT]: false
-        }
+        },
+        visibleChunks: new Set() // Track loaded chunks for this player
     };
+
+    const player = players[socket.id];
+    const playerGridX = Math.floor(player.x / BLOCK_SIZE);
+    const playerGridY = Math.floor(player.y / BLOCK_SIZE);
+    const visibleChunks = chunkManager.getVisibleChunks(playerGridX, playerGridY, 1024, 768);
+    const serializedChunks = [];
+    
+    for (const chunk of visibleChunks) {
+        serializedChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'foreground'));
+        serializedChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'background'));
+        player.visibleChunks.add(`${chunk.chunkX},${chunk.chunkY}`);
+    }
 
     socket.emit('init', {
         id: socket.id,
-        world: world,
-        backgroundWorld,
+        chunks: serializedChunks,
         players: players,
         droppedItems: droppedItems,
         mobs: mobs,
         WORLD_WIDTH,
         WORLD_HEIGHT,
         BLOCK_SIZE,
+        CHUNK_SIZE,
         MAX_HP,
         MAX_BUILD_RANGE,
         inventory: starterInventory,
@@ -647,6 +673,29 @@ io.on('connection', (socket) => {
         p.vx = vx;
         p.lastMoveAt = now;
         socket.broadcast.emit('player_moved', p);
+
+        // Check if player moved to different chunks and send new chunks
+        const playerGridX = Math.floor(p.x / BLOCK_SIZE);
+        const playerGridY = Math.floor(p.y / BLOCK_SIZE);
+        const visibleChunks = chunkManager.getVisibleChunks(playerGridX, playerGridY, 1024, 768);
+        const newChunkKeys = new Set();
+        const newChunks = [];
+
+        for (const chunk of visibleChunks) {
+            const key = `${chunk.chunkX},${chunk.chunkY}`;
+            newChunkKeys.add(key);
+            
+            if (!p.visibleChunks.has(key)) {
+                newChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'foreground'));
+                newChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'background'));
+            }
+        }
+
+        if (newChunks.length > 0) {
+            socket.emit('chunks_loaded', { chunks: newChunks });
+        }
+        
+        p.visibleChunks = newChunkKeys;
     });
 
     // 🚪 Door Warp Teleportation Logic
