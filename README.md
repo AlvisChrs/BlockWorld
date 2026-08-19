@@ -4,19 +4,27 @@ A 2D multiplayer sandbox web game inspired by mechanics from Growtopia and Terra
 
 ## Features
 
-- Procedural World Generation: Natural terrain featuring rolling hills, trees, surface grass, subsurface dirt, and deep stone layers with underground ice and lava pockets.
-- Day and Night Cycle: A 2-minute cycle alternating between day and night with dynamic sky color transitions and celestial rendering.
-- Enemy Mobs & Combat: Knight mobs spawn exclusively at night and attack non-admin players. Daytime causes night mobs to despawn. Weapons include fists, wooden swords, and stone swords.
-- Door Warp Teleportation System: Doors are assigned stable pair IDs as they are placed (the first two are ID 1, the next two are ID 2, and so on). Press `W` at a door to warp only to its matching pair.
-- Ambient Lofi Music & Rain Audio: A local three-track CC0 lofi playlist and procedural rain soundscape, controlled from one toggle button. Track/source details are in `public/assets/music/LICENSE.md`.
-- Inventory & Crafting: Tabbed inventory interface with a 5-slot hotbar, crafting system for solid structures, doors, and weapons, and physical item drops with proximity pickup.
-- Admin / Moderation Mode: Moderation commands including flight, noclip collision bypass, mob immunity, and unconstrained build range.
+- **Procedural World Generation:** Natural terrain featuring rolling hills, trees, surface grass, subsurface dirt, and deep stone layers with underground ice and lava pockets.
+- **Chunked World Sync & Spatial Partitioning:** Efficient 32x32 chunk-room routing and spatial event broadcasting, emitting events only to nearby players for optimal bandwidth and network performance.
+- **Offloaded Web Worker Physics:** Multi-threaded client-side physics execution offloaded to a dedicated Web Worker (`physicsWorker.js`) for smooth 60 FPS gameplay rendering.
+- **Technical Infrastructure & Reliability:**
+  - **SaveManager Service:** Automatic periodic world saves with automated rolling backup rotation to prevent data corruption.
+  - **Validator Utility:** Server-side input validation, string sanitization, and chat rate-limiting for enhanced security.
+  - **Logger Service:** Centralized structured logging for server events and diagnostic monitoring.
+  - **NetworkHandler Service:** Robust Socket.IO error handling, connection tracking, and rate limiting.
+  - **Health Endpoint:** Dedicated `/health` REST endpoint for server health and uptime monitoring.
+- **Day and Night Cycle:** Dynamic sky color transitions and celestial rendering with night-only mob spawns.
+- **Enemy Mobs & Combat:** Knight mobs spawn at night and attack non-admin players. Weapons include fists, wooden swords, and stone swords.
+- **Door Warp Teleportation System:** Door pair teleportation system with stable matching IDs. Press `W` at a door to warp to its pair.
+- **Ambient Audio:** CC0 lofi music playlist and procedural rain soundscape with dedicated audio controls.
+- **Inventory & Crafting:** Tabbed inventory interface with hotbar, crafting system for structures/tools, and physical item drops with proximity pickup.
+- **Admin / Moderation Mode:** Moderation commands including flight, noclip collision bypass, mob immunity, and item spawning.
 
 ## Tech Stack
 
-- Backend: Node.js, Express.js
-- Real-time Networking: Socket.IO
-- Frontend: HTML5 Canvas, Web Audio API, Vanilla JavaScript, CSS
+- **Backend:** Node.js, Express.js
+- **Real-time Networking:** Socket.IO
+- **Frontend:** HTML5 Canvas, Web Workers, Web Audio API, Vanilla JavaScript, CSS
 
 ## Getting Started
 
@@ -61,13 +69,15 @@ A 2D multiplayer sandbox web game inspired by mechanics from Growtopia and Terra
 Execute via global chat:
 
 - `/loginadmin <password>` - Enable administrator privileges. Set the password with `ADMIN_PASSWORD`.
+- `/logoutadmin` - Relinquish administrator privileges.
 - `/fly` - Toggle flight mode.
 - `/noclip` - Toggle block collision bypass.
 - `/give <item_id> <quantity>` - Add items directly to inventory.
 
-## Server Configuration
+## Server Endpoints & Configuration
 
 - `PORT` - Server port. Defaults to `3000`.
 - `ADMIN_PASSWORD` - Enables the `/loginadmin` command when set.
+- `GET /health` - Returns JSON response with server health status, active connections, and memory usage.
 
-World state is saved locally to `data/world-state.json` and auto-saved while the server is running.
+World state is managed by `SaveManager` with rolling backups in `data/` and automatically saved during normal operation and graceful shutdowns.
