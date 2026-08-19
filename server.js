@@ -153,33 +153,41 @@ let chunkManager = null;
 const DEFAULT_VIEW_RADIUS = CHUNK_SIZE * BLOCK_SIZE * 1.5; // pixels
 function squared(v){ return v*v; }
 
-function sendToNearbyPlayers(event, payload, x, y, radius = DEFAULT_VIEW_RADIUS) {
-    const r2 = radius * radius;
-    for (const id in players) {
-        const p = players[id];
-        if (!p) continue;
-        const dx = p.x - x;
-        const dy = p.y - y;
-        if (dx*dx + dy*dy <= r2) {
-            io.to(id).emit(event, payload);
+const DEBUG = process.env.DEBUG === '1';
+
+function emitToChunkNeighbors(event, payload, chunkX, chunkY, range = 1) {
+    for (let dx = -range; dx <= range; dx++) {
+        for (let dy = -range; dy <= range; dy++) {
+            const k = `${chunkX + dx},${chunkY + dy}`;
+            io.to(`chunk:${k}`).emit(event, payload);
         }
     }
 }
 
+function sendToNearbyPlayers(event, payload, x, y, radius = DEFAULT_VIEW_RADIUS) {
+    // Backwards-compatible API: route by chunk rooms based on coordinates
+    const px = Math.floor(x / BLOCK_SIZE);
+    const py = Math.floor(y / BLOCK_SIZE);
+    const chunkX = Math.floor(px / CHUNK_SIZE);
+    const chunkY = Math.floor(py / CHUNK_SIZE);
+    emitToChunkNeighbors(event, payload, chunkX, chunkY, 1);
+}
+
 function sendMobsUpdateNearby() {
-    // For each player, send only nearby mobs to reduce bandwidth
-    const radius = DEFAULT_VIEW_RADIUS;
-    const r2 = radius * radius;
-    for (const id in players) {
-        const p = players[id];
-        if (!p) continue;
-        const nearby = [];
-        for (const m of mobs) {
-            const dx = (m.x || 0) - p.x;
-            const dy = (m.y || 0) - p.y;
-            if (dx*dx + dy*dy <= r2) nearby.push(m);
-        }
-        io.to(id).emit('mobs_update', nearby);
+    // Group mobs by chunk and emit the list to each chunk room
+    const groups = new Map();
+    for (const m of mobs) {
+        const gx = Math.floor((m.x + 16) / BLOCK_SIZE);
+        const gy = Math.floor((m.y + 32) / BLOCK_SIZE);
+        const chunkX = Math.floor(gx / CHUNK_SIZE);
+        const chunkY = Math.floor(gy / CHUNK_SIZE);
+        const key = `${chunkX},${chunkY}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(m);
+    }
+
+    for (const [key, list] of groups) {
+        io.to(`chunk:${key}`).emit('mobs_update', list);
     }
 }
 
@@ -262,7 +270,7 @@ let saveTimer = null;
 let saveInProgress = false;
 let savePending = false;
 
-function saveWorldState() {
+async function saveWorldState() {
     if (saveInProgress) {
         savePending = true;
         return;
@@ -280,14 +288,16 @@ function saveWorldState() {
             droppedItems,
             nextItemId
         };
-        fs.writeFileSync(WORLD_SAVE_PATH, JSON.stringify(payload, null, 2));
+        await fs.promises.writeFile(WORLD_SAVE_PATH, JSON.stringify(payload, null, 2), 'utf8');
+        if (DEBUG) console.log('[save] world saved async');
     } catch (err) {
         console.error('[save] Failed to save world state.', err);
     } finally {
         saveInProgress = false;
         if (savePending) {
             savePending = false;
-            saveWorldState();
+            // schedule next save asynchronously
+            setImmediate(() => saveWorldState());
         }
     }
 }
@@ -303,8 +313,8 @@ function scheduleWorldSave() {
 function shutdown(signal) {
     console.log(`[save] ${signal} received. Saving world state before exit.`);
     if (saveTimer) clearTimeout(saveTimer);
-    saveWorldState();
-    process.exit(0);
+    // ensure async save finishes, then exit
+    saveWorldState().then(() => process.exit(0)).catch(() => process.exit(0));
 }
 
 loadWorldState();
@@ -394,7 +404,10 @@ function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
         spawnTime: Date.now()
     };
     droppedItems.push(item);
-    sendToNearbyPlayers('item_spawned', item, item.x, item.y);
+    // emit to the chunk room where item spawned
+    const pcx = Math.floor((Math.floor(item.x / BLOCK_SIZE)) / CHUNK_SIZE);
+    const pcy = Math.floor((Math.floor(item.y / BLOCK_SIZE)) / CHUNK_SIZE);
+    emitToChunkNeighbors('item_spawned', item, pcx, pcy, 1);
     scheduleWorldSave();
 }
 
@@ -405,7 +418,9 @@ function handleDeath(p, io, reason) {
     p.isDead = true;
     p.deathSequence = (p.deathSequence || 0) + 1;
     io.to(p.id).emit('hp_update', p.hp);
-    sendToNearbyPlayers('player_died', { id: p.id, reason }, p.x, p.y);
+    const pcx = Math.floor((Math.floor(p.x / BLOCK_SIZE)) / CHUNK_SIZE);
+    const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
+    emitToChunkNeighbors('player_died', { id: p.id, reason }, pcx, pcy, 1);
     
     setTimeout(() => {
         const player = players[p.id];
@@ -509,7 +524,9 @@ setInterval(() => {
                 if (dist < 40) {
                     p.inventory[item.itemType] = (p.inventory[item.itemType] || 0) + item.amount;
                     io.to(id).emit('inventory_update', p.inventory);
-                    sendToNearbyPlayers('item_picked_up', { itemId: item.id, playerId: id }, item.x, item.y);
+                    const pcx = Math.floor((Math.floor(item.x / BLOCK_SIZE)) / CHUNK_SIZE);
+                    const pcy = Math.floor((Math.floor(item.y / BLOCK_SIZE)) / CHUNK_SIZE);
+                    emitToChunkNeighbors('item_picked_up', { itemId: item.id, playerId: id }, pcx, pcy, 1);
                     droppedItems.splice(i, 1);
                     break;
                 }
@@ -544,58 +561,65 @@ setInterval(() => {
                     facingRight: true
                 };
                 mobs.push(newMob);
-                sendToNearbyPlayers('mob_spawned', newMob, newMob.x, newMob.y);
+                const mcx = Math.floor((Math.floor(newMob.x / BLOCK_SIZE)) / CHUNK_SIZE);
+                const mcy = Math.floor((Math.floor(newMob.y / BLOCK_SIZE)) / CHUNK_SIZE);
+                emitToChunkNeighbors('mob_spawned', newMob, mcx, mcy, 1);
             }
         }
     }
 }, MOB_SPAWN_INTERVAL);
 
-// Mob Physics & AI Update (20 FPS)
+// Mob Physics & AI Update (20 FPS) - AI decisions will be assisted by a worker
+const { Worker } = require('worker_threads');
+let mobWorker = null;
+try {
+    mobWorker = new Worker(path.join(__dirname, 'world', 'mobWorker.js'));
+    mobWorker.postMessage({ type: 'config', tickMs: 100 });
+    if (DEBUG) console.log('[worker] mobWorker started');
+} catch (e) {
+    console.error('[worker] failed to start mob worker', e);
+    mobWorker = null;
+}
+
+if (mobWorker) {
+    mobWorker.on('message', (msg) => {
+        if (!msg || msg.type !== 'decisions') return;
+        for (const d of msg.decisions || []) {
+            const m = mobs.find(x => x.id === d.id);
+            if (!m) continue;
+            if (typeof d.vx === 'number') m.vx = d.vx;
+            if (d.attack && d.targetId) {
+                const target = players[d.targetId];
+                if (target) {
+                    // apply attack
+                    if (m.attackCooldown <= 0) {
+                        m.attackCooldown = 30;
+                        target.hp = Math.max(0, target.hp - 2);
+                        target.lastDamageTime = Date.now();
+                        io.to(target.id).emit('hp_update', target.hp);
+                        const roomKey = `${Math.floor((Math.floor((m.x + 16) / BLOCK_SIZE) / CHUNK_SIZE))},${Math.floor((Math.floor((m.y + 32) / BLOCK_SIZE) / CHUNK_SIZE))}`;
+                        io.to(`chunk:${roomKey}`).emit('mob_attack', { mobId: m.id, targetId: target.id, damage: 2 });
+                        if (target.hp === 0) handleDeath(target, io, 'knight');
+                    }
+                }
+            }
+        }
+    });
+}
+
 setInterval(() => {
+    // Send snapshot to worker
+    if (mobWorker) {
+        try {
+            mobWorker.postMessage({ type: 'snapshot', mobs: mobs.map(m => ({ id: m.id, x: m.x, y: m.y, vx: m.vx, hp: m.hp })), players });
+        } catch (e) { if (DEBUG) console.error('[worker] post error', e); }
+    }
+
     for (let i = mobs.length - 1; i >= 0; i--) {
         const mob = mobs[i];
         if (mob.hp <= 0) continue;
 
-        let closestPlayer = null;
-        let minDist = 12 * BLOCK_SIZE;
-
-        for (let id in players) {
-            const p = players[id];
-            if (p.hp <= 0 || p.isAdmin) continue;
-
-            const d = Math.hypot(p.x - mob.x, p.y - mob.y);
-            if (d < minDist) {
-                minDist = d;
-                closestPlayer = p;
-            }
-        }
-
-        if (closestPlayer) {
-            if (closestPlayer.x > mob.x + 8) { mob.vx = 2.5; mob.facingRight = true; }
-            else if (closestPlayer.x < mob.x - 8) { mob.vx = -2.5; mob.facingRight = false; }
-            else mob.vx = 0;
-
-            const frontX = mob.x + (mob.vx > 0 ? BLOCK_SIZE : -4);
-            const frontBlock = getBlock(Math.floor(frontX / BLOCK_SIZE), Math.floor((mob.y + 16) / BLOCK_SIZE));
-            if (frontBlock !== BLOCKS.AIR && mob.vy === 0) {
-                mob.vy = MOB_JUMP_FORCE;
-                mob.jumpStartY = mob.y;
-            }
-
-            if (mob.attackCooldown > 0) mob.attackCooldown--;
-            if (minDist < 42 && mob.attackCooldown <= 0) {
-                mob.attackCooldown = 30;
-                closestPlayer.hp = Math.max(0, closestPlayer.hp - 2);
-                closestPlayer.lastDamageTime = Date.now();
-                io.to(closestPlayer.id).emit('hp_update', closestPlayer.hp);
-                sendToNearbyPlayers('mob_attack', { mobId: mob.id, targetId: closestPlayer.id, damage: 2 }, mob.x, mob.y);
-                if (closestPlayer.hp === 0) handleDeath(closestPlayer, io, 'knight');
-            }
-        } else {
-            mob.vx *= 0.8;
-            if (Math.abs(mob.vx) < 0.1) mob.vx = 0;
-        }
-
+        // basic physics (gravity, movement)
         mob.vy = Math.min(mob.vy + 0.5, 12);
         mob.x += mob.vx;
         mob.y += mob.vy;
@@ -614,8 +638,15 @@ setInterval(() => {
         }
 
         mob.x = Math.max(0, Math.min(mob.x, (WORLD_WIDTH - 1) * BLOCK_SIZE));
+
+        if (mob.hp <= 0) {
+            spawnDroppedItem(BLOCKS.STONE, mob.x, mob.y, 2);
+            spawnDroppedItem(BLOCKS.WOOD, mob.x + 8, mob.y, 1);
+            mobs.splice(i, 1);
+        }
     }
-    // Send per-player nearby mob updates to reduce bandwidth
+
+    // Emit mob lists per chunk to reduce bandwidth
     sendMobsUpdateNearby();
 }, 50);
 
@@ -710,7 +741,10 @@ io.on('connection', (socket) => {
         p.y = y;
         p.vx = vx;
         p.lastMoveAt = now;
-        socket.broadcast.emit('player_moved', p);
+        // Emit player_moved to player's current chunk and neighbors
+        const pcx = Math.floor((Math.floor(p.x / BLOCK_SIZE)) / CHUNK_SIZE);
+        const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
+        emitToChunkNeighbors('player_moved', p, pcx, pcy, 1);
 
         // Check if player moved to different chunks and send new chunks
         const playerGridX = Math.floor(p.x / BLOCK_SIZE);
@@ -775,7 +809,10 @@ io.on('connection', (socket) => {
             sendToNearbyPlayers('door_warped', { x: p.x, y: p.y }, p.x, p.y);
 
             io.to(socket.id).emit('respawn', { x: p.x, y: p.y, hp: p.hp });
-            sendToNearbyPlayers('player_moved', p, p.x, p.y);
+            // Emit player_moved via chunk rooms
+        const pcx = Math.floor((Math.floor(p.x / BLOCK_SIZE)) / CHUNK_SIZE);
+        const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
+        emitToChunkNeighbors('player_moved', p, pcx, pcy, 1);
             socket.emit('server_message', `Warped through Door ID ${sourceDoor.pairId}.`);
         }
     });
@@ -945,13 +982,16 @@ io.on('connection', (socket) => {
         mob.vx = (mob.x > p.x ? 1 : -1) * 5;
         mob.vy = -3;
 
-        sendToNearbyPlayers('mob_damaged', { mobId: mob.id, hp: mob.hp, maxHp: mob.maxHp, damage }, mob.x, mob.y);
+        const mcx = Math.floor((Math.floor(mob.x / BLOCK_SIZE)) / CHUNK_SIZE);
+        const mcy = Math.floor((Math.floor(mob.y / BLOCK_SIZE)) / CHUNK_SIZE);
+        emitToChunkNeighbors('mob_damaged', { mobId: mob.id, hp: mob.hp, maxHp: mob.maxHp, damage }, mcx, mcy, 1);
 
         if (mob.hp <= 0) {
             spawnDroppedItem(BLOCKS.STONE, mob.x, mob.y, 2);
             spawnDroppedItem(BLOCKS.WOOD, mob.x + 8, mob.y, 1);
             mobs.splice(mobIndex, 1);
-            sendToNearbyPlayers('mob_died', { mobId: mob.id }, mob.x, mob.y);
+            const roomKey = `${Math.floor((Math.floor((mob.x + 16) / BLOCK_SIZE) / CHUNK_SIZE))},${Math.floor((Math.floor((mob.y + 32) / BLOCK_SIZE) / CHUNK_SIZE))}`;
+            io.to(`chunk:${roomKey}`).emit('mob_died', { mobId: mob.id });
         }
     });
 
