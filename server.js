@@ -569,86 +569,72 @@ setInterval(() => {
     }
 }, MOB_SPAWN_INTERVAL);
 
-// Mob Physics & AI Update (20 FPS) - AI decisions will be assisted by a worker
+// Physics worker: full physics for mobs and items (gravity, movement, collisions, pickups)
 const { Worker } = require('worker_threads');
-let mobWorker = null;
+let physicsWorker = null;
 try {
-    mobWorker = new Worker(path.join(__dirname, 'world', 'mobWorker.js'));
-    mobWorker.postMessage({ type: 'config', tickMs: 100 });
-    if (DEBUG) console.log('[worker] mobWorker started');
+    physicsWorker = new Worker(path.join(__dirname, 'world', 'physicsWorker.js'));
+    physicsWorker.postMessage({ type: 'config', tickMs: 50, BLOCK_SIZE, CHUNK_SIZE, WORLD_WIDTH, WORLD_HEIGHT });
 } catch (e) {
-    console.error('[worker] failed to start mob worker', e);
-    mobWorker = null;
+    console.error('[worker] failed to start physics worker', e);
+    physicsWorker = null;
 }
 
-if (mobWorker) {
-    mobWorker.on('message', (msg) => {
-        if (!msg || msg.type !== 'decisions') return;
-        for (const d of msg.decisions || []) {
-            const m = mobs.find(x => x.id === d.id);
-            if (!m) continue;
-            if (typeof d.vx === 'number') m.vx = d.vx;
-            if (d.attack && d.targetId) {
-                const target = players[d.targetId];
+if (physicsWorker) {
+    physicsWorker.on('message', (msg) => {
+        if (!msg || msg.type !== 'physics') return;
+        // Apply authoritative updates from worker
+        if (Array.isArray(msg.mobs)) mobs = msg.mobs;
+        if (Array.isArray(msg.droppedItems)) droppedItems = msg.droppedItems;
+
+        // Process events emitted by worker
+        for (const ev of msg.events || []) {
+            if (!ev || !ev.type) continue;
+            if (ev.type === 'item_picked_up') {
+                const player = players[ev.playerId];
+                if (player) {
+                    player.inventory[ev.itemType] = (player.inventory[ev.itemType] || 0) + ev.amount;
+                    io.to(ev.playerId).emit('inventory_update', player.inventory);
+                    const pcx = Math.floor((Math.floor(ev.x / BLOCK_SIZE)) / CHUNK_SIZE);
+                    const pcy = Math.floor((Math.floor(ev.y / BLOCK_SIZE)) / CHUNK_SIZE);
+                    emitToChunkNeighbors('item_picked_up', { itemId: ev.itemId, playerId: ev.playerId }, pcx, pcy, 1);
+                }
+            } else if (ev.type === 'mob_attack') {
+                const target = players[ev.targetId];
                 if (target) {
-                    // apply attack
-                    if (m.attackCooldown <= 0) {
-                        m.attackCooldown = 30;
-                        target.hp = Math.max(0, target.hp - 2);
-                        target.lastDamageTime = Date.now();
-                        io.to(target.id).emit('hp_update', target.hp);
-                        const roomKey = `${Math.floor((Math.floor((m.x + 16) / BLOCK_SIZE) / CHUNK_SIZE))},${Math.floor((Math.floor((m.y + 32) / BLOCK_SIZE) / CHUNK_SIZE))}`;
-                        io.to(`chunk:${roomKey}`).emit('mob_attack', { mobId: m.id, targetId: target.id, damage: 2 });
-                        if (target.hp === 0) handleDeath(target, io, 'knight');
-                    }
+                    target.hp = Math.max(0, target.hp - ev.damage);
+                    target.lastDamageTime = Date.now();
+                    io.to(ev.targetId).emit('hp_update', target.hp);
+                    const pcx = Math.floor((Math.floor(ev.x / BLOCK_SIZE)) / CHUNK_SIZE);
+                    const pcy = Math.floor((Math.floor(ev.y / BLOCK_SIZE)) / CHUNK_SIZE);
+                    emitToChunkNeighbors('mob_attack', { mobId: ev.mobId, targetId: ev.targetId, damage: ev.damage }, pcx, pcy, 1);
+                    if (target.hp === 0) handleDeath(target, io, 'knight');
+                }
+            } else if (ev.type === 'mob_died') {
+                const idx = mobs.findIndex(m => m.id === ev.mobId);
+                if (idx !== -1) {
+                    spawnDroppedItem(BLOCKS.STONE, ev.x, ev.y, 2);
+                    spawnDroppedItem(BLOCKS.WOOD, ev.x + 8, ev.y, 1);
+                    mobs.splice(idx, 1);
+                    const rk = `${Math.floor((Math.floor(ev.x / BLOCK_SIZE)) / CHUNK_SIZE)},${Math.floor((Math.floor(ev.y / BLOCK_SIZE)) / CHUNK_SIZE)}`;
+                    io.to(`chunk:${rk}`).emit('mob_died', { mobId: ev.mobId });
                 }
             }
         }
+
+        // Broadcast mobs per-chunk
+        sendMobsUpdateNearby();
     });
 }
 
 setInterval(() => {
-    // Send snapshot to worker
-    if (mobWorker) {
+    if (physicsWorker) {
         try {
-            mobWorker.postMessage({ type: 'snapshot', mobs: mobs.map(m => ({ id: m.id, x: m.x, y: m.y, vx: m.vx, hp: m.hp })), players });
-        } catch (e) { if (DEBUG) console.error('[worker] post error', e); }
+            physicsWorker.postMessage({ type: 'snapshot', mobs, droppedItems, players, world, backgroundWorld });
+        } catch (e) { /* ignore */ }
     }
-
-    for (let i = mobs.length - 1; i >= 0; i--) {
-        const mob = mobs[i];
-        if (mob.hp <= 0) continue;
-
-        // basic physics (gravity, movement)
-        mob.vy = Math.min(mob.vy + 0.5, 12);
-        mob.x += mob.vx;
-        mob.y += mob.vy;
-        if (mob.jumpStartY !== undefined && mob.y < mob.jumpStartY - MOB_MAX_JUMP_HEIGHT) {
-            mob.y = mob.jumpStartY - MOB_MAX_JUMP_HEIGHT;
-            mob.vy = 0;
-        }
-
-        const mobGx = Math.floor((mob.x + 16) / BLOCK_SIZE);
-        const mobGy = Math.floor((mob.y + 32) / BLOCK_SIZE);
-        const bBelow = getBlock(mobGx, mobGy);
-        if (bBelow !== BLOCKS.AIR) {
-            mob.y = (mobGy - 1) * BLOCK_SIZE;
-            mob.vy = 0;
-            delete mob.jumpStartY;
-        }
-
-        mob.x = Math.max(0, Math.min(mob.x, (WORLD_WIDTH - 1) * BLOCK_SIZE));
-
-        if (mob.hp <= 0) {
-            spawnDroppedItem(BLOCKS.STONE, mob.x, mob.y, 2);
-            spawnDroppedItem(BLOCKS.WOOD, mob.x + 8, mob.y, 1);
-            mobs.splice(i, 1);
-        }
-    }
-
-    // Emit mob lists per chunk to reduce bandwidth
-    sendMobsUpdateNearby();
 }, 50);
+
 
 // ─── Socket Events ────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
