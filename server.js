@@ -5,11 +5,42 @@ const path = require('path');
 const { Server } = require('socket.io');
 const ChunkManager = require('./world/ChunkManager');
 
+// ─── Import Services ──────────────────────────────────────────────────────────
+const Logger = require('./services/Logger');
+const SaveManager = require('./services/SaveManager');
+const NetworkHandler = require('./services/NetworkHandler');
+const Validator = require('./utils/Validator');
+
+// ─── Initialize Services ──────────────────────────────────────────────────────
+const logger = new Logger({ isDev: process.env.NODE_ENV !== 'production' });
+const DATA_DIR = path.join(__dirname, 'data');
+const WORLD_SAVE_PATH = path.join(DATA_DIR, 'world-state.json');
+
+const saveManager = new SaveManager({
+    savePath: WORLD_SAVE_PATH,
+    backupDir: path.join(DATA_DIR, 'backups'),
+    maxBackups: 5,
+    autoSaveInterval: 300000, // 5 minutes
+    logger
+});
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+    cors: { origin: '*' }
+});
+
+const networkHandler = new NetworkHandler({
+    io,
+    logger,
+    reconnectTimeout: 30000,
+    maxReconnectAttempts: 5
+});
 
 app.use(express.static('public'));
+
+// Setup error handlers
+networkHandler.setupErrorHandlers();
 
 // Game Constants
 const WORLD_WIDTH = 100;
@@ -27,9 +58,7 @@ const MOB_JUMP_FORCE = -5.5;
 const MOB_MAX_JUMP_HEIGHT = BLOCK_SIZE * 1.25;
 const MOB_MAX_COUNT = 2;
 const MOB_SPAWN_INTERVAL = 25000;
-const SAVE_INTERVAL = 30000;
-const DATA_DIR = path.join(__dirname, 'data');
-const WORLD_SAVE_PATH = path.join(DATA_DIR, 'world-state.json');
+const DATA_DIR_PATH = DATA_DIR;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 
 // Day / Night Cycle Constants (Total 120s: 60s Day, 60s Night)
@@ -311,10 +340,37 @@ function scheduleWorldSave() {
 }
 
 function shutdown(signal) {
-    console.log(`[save] ${signal} received. Saving world state before exit.`);
-    if (saveTimer) clearTimeout(saveTimer);
-    // ensure async save finishes, then exit
-    saveWorldState().then(() => process.exit(0)).catch(() => process.exit(0));
+    logger.info('Shutdown signal received', { signal });
+    
+    // Stop auto-save timer
+    saveManager.stopAutoSave();
+    
+    // Save world state satu kali lagi sebelum exit
+    const saveResult = saveManager.save(() => ({
+        world,
+        backgroundWorld,
+        players: Object.fromEntries(
+            Object.entries(players).map(([id, p]) => [id, {
+                username: p.username,
+                x: p.x,
+                y: p.y,
+                hp: p.hp,
+                inventory: p.inventory,
+                isAdmin: p.isAdmin
+            }])
+        ),
+        droppedItems,
+        gameTime,
+        doorEndpoints: Array.from(doorEndpoints.entries())
+    }), 'shutdown');
+    
+    if (saveResult.success) {
+        logger.info('Final save completed, exiting gracefully');
+        process.exit(0);
+    } else {
+        logger.error('Final save failed, forcing exit', { error: saveResult.error });
+        process.exit(1);
+    }
 }
 
 loadWorldState();
@@ -322,9 +378,29 @@ loadWorldState();
 // Initialize chunk manager from loaded world
 chunkManager = new ChunkManager(WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE);
 chunkManager.initializeFromWorld(world, backgroundWorld);
-console.log(`[chunks] Initialized ${chunkManager.chunksX}x${chunkManager.chunksY} chunk grid`);
+logger.info('Chunk grid initialized', { 
+    chunks: `${chunkManager.chunksX}x${chunkManager.chunksY}` 
+});
 
-setInterval(saveWorldState, SAVE_INTERVAL);
+// Start auto-save
+saveManager.startAutoSave(() => ({
+    world,
+    backgroundWorld,
+    players: Object.fromEntries(
+        Object.entries(players).map(([id, p]) => [id, {
+            username: p.username,
+            x: p.x,
+            y: p.y,
+            hp: p.hp,
+            inventory: p.inventory,
+            isAdmin: p.isAdmin
+        }])
+    ),
+    droppedItems,
+    gameTime,
+    doorEndpoints: Array.from(doorEndpoints.entries())
+}));
+
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
@@ -815,34 +891,47 @@ io.on('connection', (socket) => {
         const { gridX, gridY } = data;
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
-        if (!Number.isInteger(gridX) || !Number.isInteger(gridY)) return;
+        
+        // Input validation
+        if (!Number.isInteger(gridX) || !Number.isInteger(gridY)) {
+            logger.warn('Invalid block coordinates', { gridX, gridY, playerId: socket.id });
+            return;
+        }
 
-        if (gridX >= 0 && gridX < WORLD_WIDTH && gridY >= 0 && gridY < WORLD_HEIGHT) {
-            if (!checkRange(p, gridX, gridY)) {
-                fail(socket, 'Too far away to break that block.');
-                return;
-            }
+        // Coordinate validation
+        if (!Validator.isValidCoordinate(gridX, gridY, WORLD_WIDTH, WORLD_HEIGHT)) {
+            fail(socket, 'That position is outside the world.');
+            return;
+        }
 
-            const foregroundBlock = getBlock(gridX, gridY);
-            const backgroundBlock = getBlock(gridX, gridY, 'background');
-            const layer = foregroundBlock !== BLOCKS.AIR ? 'foreground' : 'background';
-            const oldBlock = layer === 'foreground' ? foregroundBlock : backgroundBlock;
-            if (oldBlock !== BLOCKS.AIR) {
-                if (oldBlock === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
-                setBlock(gridX, gridY, BLOCKS.AIR, layer);
-                const roomKey = `chunk:${Math.floor(gridX / CHUNK_SIZE)},${Math.floor(gridY / CHUNK_SIZE)}`;
-                io.to(roomKey).emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR, layer });
-                (async () => {
-                    try {
-                        const sockets = await io.in(roomKey).allSockets();
-                        console.log(`[room] world_update (break) emitted to ${sockets.size} sockets in ${roomKey}:`, Array.from(sockets).slice(0, 10));
-                    } catch (e) { console.error('[room] failed to list sockets', e); }
-                })();
-                spawnDroppedItem(oldBlock, gridX * BLOCK_SIZE + 8, gridY * BLOCK_SIZE + 8, 1);
-                scheduleWorldSave();
-            } else {
-                fail(socket, 'There is no block there to break.');
-            }
+        if (!checkRange(p, gridX, gridY)) {
+            fail(socket, 'Too far away to break that block.');
+            return;
+        }
+
+        const foregroundBlock = getBlock(gridX, gridY);
+        const backgroundBlock = getBlock(gridX, gridY, 'background');
+        const layer = foregroundBlock !== BLOCKS.AIR ? 'foreground' : 'background';
+        const oldBlock = layer === 'foreground' ? foregroundBlock : backgroundBlock;
+        if (oldBlock !== BLOCKS.AIR) {
+            if (oldBlock === BLOCKS.DOOR) doorEndpoints.delete(doorKey(gridX, gridY));
+            setBlock(gridX, gridY, BLOCKS.AIR, layer);
+            const roomKey = `chunk:${Math.floor(gridX / CHUNK_SIZE)},${Math.floor(gridY / CHUNK_SIZE)}`;
+            io.to(roomKey).emit('world_update', { gridX, gridY, blockId: BLOCKS.AIR, layer });
+            (async () => {
+                try {
+                    const sockets = await io.in(roomKey).allSockets();
+                    logger.debug('world_update emitted', { 
+                        type: 'break',
+                        socketCount: sockets.size,
+                        roomKey 
+                    });
+                } catch (e) { logger.error('Failed to list sockets', { error: e.message }); }
+            })();
+            spawnDroppedItem(oldBlock, gridX * BLOCK_SIZE + 8, gridY * BLOCK_SIZE + 8, 1);
+            scheduleWorldSave();
+        } else {
+            fail(socket, 'There is no block there to break.');
         }
     });
 
@@ -984,8 +1073,19 @@ io.on('connection', (socket) => {
     socket.on('chat_message', (msg) => {
         const player = players[socket.id];
         if (!player || typeof msg !== 'string') return;
-        msg = msg.trim().slice(0, 300);
+        
+        // Sanitize message
+        msg = Validator.sanitizeMessage(msg);
         if (!msg) return;
+
+        // Rate limiting for chat (max 5 messages per 5 seconds)
+        if (!player.lastChatTime) player.lastChatTime = 0;
+        const now = Date.now();
+        if (now - player.lastChatTime < 1000) {
+            socket.emit('server_message', '⏱️ Slow down! Chat rate limit.');
+            return;
+        }
+        player.lastChatTime = now;
 
         if (msg.startsWith('/')) {
             const args = msg.split(' ');
@@ -997,6 +1097,7 @@ io.on('connection', (socket) => {
                     return;
                 }
                 if (args[1] !== ADMIN_PASSWORD) {
+                    logger.warn('Failed admin login attempt', { playerId: socket.id });
                     socket.emit('server_message', 'Invalid admin password.');
                     return;
                 }
@@ -1065,6 +1166,20 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`BlockWorld Alpha Server running on http://localhost:${PORT}`);
-});
+
+try {
+    server.listen(PORT, () => {
+        logger.info('Server started successfully', { 
+            port: PORT,
+            env: process.env.NODE_ENV || 'development'
+        });
+        
+        // Log health check endpoint
+        app.get('/health', (req, res) => {
+            res.json(networkHandler.getHealth());
+        });
+    });
+} catch (error) {
+    logger.error('Failed to start server', { error: error.message });
+    process.exit(1);
+}
