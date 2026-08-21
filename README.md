@@ -1,5 +1,7 @@
 # BlockWorld (Alpha)
 
+![Node.js](https://img.shields.io/badge/Node.js-v14+-brightgreen) ![Tests](https://img.shields.io/badge/tests-42%20passing-brightgreen) ![Database](https://img.shields.io/badge/database-SQLite-blue) ![License](https://img.shields.io/badge/license-MIT-blue)
+
 A 2D multiplayer sandbox web game inspired by mechanics from Growtopia and Terraria. Built from scratch using Node.js, Express, Socket.IO, and HTML5 Canvas.
 
 ## Features
