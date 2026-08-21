@@ -68,7 +68,7 @@ class NetworkHandler {
                     // Player belum reconnect, cleanup
                     delete this.players[playerId];
                     this.logger.info('Player cleanup after timeout', { playerId });
-                    this.io.emit('playerLeft', { playerId });
+                    this.io.emit('player_left', playerId);
                 }
             }, this.reconnectTimeout);
 

@@ -172,6 +172,13 @@ let droppedItems = [];
 let mobs = [];
 let nextItemId = 1;
 let nextMobId = 1;
+
+// Wire up shared players reference so NetworkHandler can access player data
+networkHandler.players = players;
+
+// Rate limiters for socket events
+const moveLimiter  = networkHandler.createRateLimiter(60, 1000);  // 60 moves/s
+const buildLimiter = networkHandler.createRateLimiter(10, 1000);  // 10 build actions/s
 // Door blocks only store their visual type in `world`, so keep their pair ID separately.
 const doorEndpoints = new Map();
 
@@ -785,7 +792,15 @@ io.on('connection', (socket) => {
 
     socket.broadcast.emit('player_joined', players[socket.id]);
 
+    // ─── NetworkHandler Integration ───────────────────────────────────────────
+    // Per-socket error handling (logs socket errors via Logger)
+    networkHandler.setupSocketErrorHandling(socket);
+
+    // Reconnect: client can emit 'reconnect_player' with their previous session data
+    socket.on('reconnect_player', networkHandler.handleReconnect(socket, socket.id, players[socket.id]));
+
     socket.on('player_move', (data) => {
+        if (!moveLimiter(socket.id)) return; // rate limit: 60/s
         const p = players[socket.id];
         if (!p || p.hp <= 0 || !data) return;
 
@@ -887,6 +902,7 @@ io.on('connection', (socket) => {
     }
 
     socket.on('break_block', (data) => {
+        if (!buildLimiter(socket.id)) return; // rate limit: 10/s
         if (!data) return;
         const { gridX, gridY } = data;
         const p = players[socket.id];
@@ -936,6 +952,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('place_block', (data) => {
+        if (!buildLimiter(socket.id)) return; // rate limit: 10/s
         if (!data) return;
         const { gridX, gridY, blockId } = data;
         const p = players[socket.id];
@@ -1158,10 +1175,14 @@ io.on('connection', (socket) => {
         io.emit('chat_message', { id: socket.id, username: player.username, color: player.color, text: msg });
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason) => {
         console.log(`[-] Player disconnected: ${socket.id}`);
-        delete players[socket.id];
-        io.emit('player_left', socket.id);
+        // Immediately notify other clients so the player disappears from their screens.
+        // NetworkHandler.handleDisconnect keeps the player entry alive during the
+        // reconnect window; it will emit 'player_left' itself only after the timeout.
+        if (players[socket.id]) io.emit('player_left', socket.id);
+        // Delegate cleanup & reconnect-window bookkeeping to NetworkHandler
+        networkHandler.handleDisconnect(socket, socket.id)(reason);
     });
 });
 
