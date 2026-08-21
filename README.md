@@ -83,3 +83,17 @@ Execute via global chat:
 - `GET /health` - Returns JSON response with server health status, active connections, and memory usage.
 
 World state is managed by `SaveManager` with rolling backups in `data/` and automatically saved during normal operation and graceful shutdowns.
+
+## Running Tests
+
+```bash
+npm test
+```
+
+## Database Migration
+
+To migrate world data from JSON to SQLite:
+
+```bash
+npm run migrate
+```
