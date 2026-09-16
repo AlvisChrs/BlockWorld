@@ -93,6 +93,37 @@ class Validator {
     static checkRateLimit(lastAction, cooldownMs) {
         return Date.now() - lastAction >= cooldownMs;
     }
+
+    /**
+     * Check if a block ID represents a solid collidable block
+     */
+    static isSolidBlock(blockId) {
+        // AIR (0), WALL (9), DOOR (10) are non-solid / passable background blocks
+        const PASSABLE_IDS = [0, 9, 10];
+        return Number.isInteger(blockId) && blockId > 0 && !PASSABLE_IDS.includes(blockId);
+    }
+
+    /**
+     * Server-side collision validation: Check if bounding box collides with solid foreground blocks
+     */
+    static isCollidingWithSolid(pixelX, pixelY, width, height, getBlockFn, blockSize = 32) {
+        if (typeof getBlockFn !== 'function') return false;
+
+        const startGx = Math.floor(pixelX / blockSize);
+        const endGx = Math.floor((pixelX + width - 1) / blockSize);
+        const startGy = Math.floor(pixelY / blockSize);
+        const endGy = Math.floor((pixelY + height - 1) / blockSize);
+
+        for (let gx = startGx; gx <= endGx; gx++) {
+            for (let gy = startGy; gy <= endGy; gy++) {
+                const blockId = getBlockFn(gx, gy, 'foreground');
+                if (Validator.isSolidBlock(blockId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 }
 
 module.exports = Validator;
