@@ -5,11 +5,16 @@ const path = require('path');
 const { Server } = require('socket.io');
 const ChunkManager = require('./world/ChunkManager');
 
-// ─── Import Services ──────────────────────────────────────────────────────────
+// ─── Import Services & Modules ──────────────────────────────────────────────
 const Logger = require('./services/Logger');
 const SaveManager = require('./services/SaveManager');
 const NetworkHandler = require('./services/NetworkHandler');
 const Validator = require('./utils/Validator');
+
+const PlayerManager = require('./modules/PlayerManager');
+const MobManager = require('./modules/MobManager');
+const EnvironmentManager = require('./modules/EnvironmentManager');
+const CombatSystem = require('./modules/CombatSystem');
 
 // ─── Initialize Services ──────────────────────────────────────────────────────
 const logger = new Logger({ isDev: process.env.NODE_ENV !== 'production' });
@@ -166,19 +171,30 @@ function generateNaturalWorld() {
     }
 }
 
+// ─── Initialize Modules ───────────────────────────────────────────────────────
+const playerManager = new PlayerManager({ maxHp: MAX_HP, blockSize: BLOCK_SIZE, chunkSize: CHUNK_SIZE });
+const mobManager = new MobManager({ maxMobs: MOB_MAX_COUNT, spawnInterval: MOB_SPAWN_INTERVAL, blockSize: BLOCK_SIZE, chunkSize: CHUNK_SIZE, worldWidth: WORLD_WIDTH });
+const environmentManager = new EnvironmentManager({ cycleDuration: CYCLE_DURATION, lavaInterval: LAVA_DAMAGE_INTERVAL, regenInterval: HP_REGEN_INTERVAL, maxHp: MAX_HP });
+const combatSystem = new CombatSystem({ maxHp: MAX_HP, respawnDelay: PLAYER_RESPAWN_DELAY, blockSize: BLOCK_SIZE, chunkSize: CHUNK_SIZE });
+
 // Game State Containers
-const players = {};
+const players = playerManager.players;
 let droppedItems = [];
-let mobs = [];
+let mobs = mobManager.mobs;
 let nextItemId = 1;
 let nextMobId = 1;
 
 // Wire up shared players reference so NetworkHandler can access player data
 networkHandler.players = players;
 
-// Rate limiters for socket events
-const moveLimiter  = networkHandler.createRateLimiter(60, 1000);  // 60 moves/s
-const buildLimiter = networkHandler.createRateLimiter(10, 1000);  // 10 build actions/s
+// Rate limiters for socket events (Protection against Socket Abuse / Spam)
+const moveLimiter   = networkHandler.createRateLimiter(60, 1000);  // 60 moves/s
+const buildLimiter  = networkHandler.createRateLimiter(10, 1000);  // 10 build actions/s
+const craftLimiter  = networkHandler.createRateLimiter(5, 1000);   // 5 crafts/s
+const attackLimiter = networkHandler.createRateLimiter(10, 1000);  // 10 attacks/s
+const doorLimiter   = networkHandler.createRateLimiter(3, 1000);   // 3 door warps/s
+const dropLimiter   = networkHandler.createRateLimiter(10, 1000);  // 10 drops/s
+
 // Door blocks only store their visual type in `world`, so keep their pair ID separately.
 const doorEndpoints = new Map();
 
@@ -385,6 +401,7 @@ loadWorldState();
 // Initialize chunk manager from loaded world
 chunkManager = new ChunkManager(WORLD_WIDTH, WORLD_HEIGHT, CHUNK_SIZE);
 chunkManager.initializeFromWorld(world, backgroundWorld);
+playerManager.setChunkManager(chunkManager);
 logger.info('Chunk grid initialized', { 
     chunks: `${chunkManager.chunksX}x${chunkManager.chunksY}` 
 });
@@ -495,41 +512,19 @@ function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
 }
 
 function handleDeath(p, io, reason) {
-    // Some callers already reduce HP to zero; `isDead` is the one-time guard.
-    if (!p || p.isDead) return;
-    p.hp = 0;
-    p.isDead = true;
-    p.deathSequence = (p.deathSequence || 0) + 1;
-    io.to(p.id).emit('hp_update', p.hp);
-    const pcx = Math.floor((Math.floor(p.x / BLOCK_SIZE)) / CHUNK_SIZE);
-    const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
-    emitToChunkNeighbors('player_died', { id: p.id, reason }, pcx, pcy, 1);
-    
-    setTimeout(() => {
-        const player = players[p.id];
-        if (player && player.isDead && player.deathSequence === p.deathSequence) {
-            player.hp = MAX_HP;
-            player.x = 10 * BLOCK_SIZE;
-            player.y = 15 * BLOCK_SIZE;
-            player.vx = 0;
-            player.isDead = false;
-            player.lastDamageTime = 0;
-            player.lastMoveAt = Date.now();
-            io.to(p.id).emit('respawn', { x: player.x, y: player.y, hp: MAX_HP });
-            sendToNearbyPlayers('player_moved', player, player.x, player.y);
-        }
-    }, PLAYER_RESPAWN_DELAY);
+    combatSystem.handlePlayerDeath(p, io, players, reason, emitToChunkNeighbors, sendToNearbyPlayers);
 }
 
 // ─── Day / Night Cycle Timer (120s loop) ──────────────────────────────────────
 setInterval(() => {
-    gameTime = (gameTime + 1) % CYCLE_DURATION;
-    const isNight = gameTime >= 60;
+    const { gameTime: updatedTime, isNight } = environmentManager.tickCycle();
+    gameTime = updatedTime;
 
     io.emit('time_sync', { gameTime, isNight });
 
-    if (gameTime === 0 && mobs.length > 0) {
-        mobs = [];
+    if (gameTime === 0 && mobManager.getMobs().length > 0) {
+        mobManager.clearMobs();
+        mobs = mobManager.getMobs();
         sendMobsUpdateNearby();
         io.emit('server_message', '🌅 Daylight arrives! All night monsters burn away.');
         for (const id in players) {
@@ -546,41 +541,12 @@ setInterval(() => {
 
 // ─── Ticker 1: Lava & Spike Damage Check ─────────────────────────────────────
 setInterval(() => {
-    for (let id in players) {
-        const p = players[id];
-        if (p.hp <= 0) continue;
-
-        const gridX = Math.floor((p.x + BLOCK_SIZE * 0.4) / BLOCK_SIZE);
-        const gridY = Math.floor((p.y + BLOCK_SIZE - 4) / BLOCK_SIZE);
-        const blockUnder = getBlock(gridX, gridY);
-        const blockAt = getBlock(gridX, Math.floor((p.y + BLOCK_SIZE / 2) / BLOCK_SIZE));
-
-        if (blockUnder === BLOCKS.SPIKE || blockAt === BLOCKS.SPIKE) {
-            handleDeath(p, io, 'spike');
-            continue;
-        }
-
-        if (blockUnder === BLOCKS.LAVA || blockAt === BLOCKS.LAVA) {
-            p.hp = Math.max(0, p.hp - 1);
-            p.lastDamageTime = Date.now();
-            io.to(id).emit('hp_update', p.hp);
-            if (p.hp === 0) handleDeath(p, io, 'lava');
-        }
-    }
+    environmentManager.checkEnvironmentHazards(players, getBlock, handleDeath, io, BLOCKS, BLOCK_SIZE);
 }, LAVA_DAMAGE_INTERVAL);
 
 // ─── Ticker 2: HP Regen ──────────────────────────────────────────────────────
 setInterval(() => {
-    const now = Date.now();
-    for (let id in players) {
-        const p = players[id];
-        if (p.hp > 0 && p.hp < MAX_HP) {
-            if (!p.lastDamageTime || now - p.lastDamageTime > 3000) {
-                p.hp++;
-                io.to(id).emit('hp_update', p.hp);
-            }
-        }
-    }
+    environmentManager.regenerateHealth(players, io);
 }, HP_REGEN_INTERVAL);
 
 // ─── Ticker 3: Dropped Items Physics & Auto-Pickup ────────────────────────────
@@ -621,26 +587,23 @@ setInterval(() => {
 // ─── Ticker 4: Knight Mob Spawner (NIGHT TIME ONLY!) & AI Loop ────────────────
 setInterval(() => {
     const isNight = gameTime >= 60;
-    if (isNight && mobs.length < MOB_MAX_COUNT) {
-        const playerIds = Object.keys(players).filter(id => players[id].hp > 0 && !players[id].isAdmin);
-        if (playerIds.length > 0) {
-            const randomPlayer = players[playerIds[Math.floor(Math.random() * playerIds.length)]];
-            const spawnDir = Math.random() < 0.5 ? -1 : 1;
-            const spawnGx = Math.floor(randomPlayer.x / BLOCK_SIZE) + spawnDir * (8 + Math.floor(Math.random() * 4));
-            
-            if (spawnGx >= 2 && spawnGx < WORLD_WIDTH - 2) {
-                let spawnGy = 20;
-                spawnGy = findSurfaceY(spawnGx) - 1;
+    if (isNight) {
+        const newMob = mobManager.spawnNightMob(players, findSurfaceY);
+        if (newMob) {
+            mobs = mobManager.getMobs();
+            const mcx = Math.floor((Math.floor(newMob.x / BLOCK_SIZE)) / CHUNK_SIZE);
+            const mcy = Math.floor((Math.floor(newMob.y / BLOCK_SIZE)) / CHUNK_SIZE);
+            emitToChunkNeighbors('mob_spawned', newMob, mcx, mcy, 1);
+        }
+    }
+}, MOB_SPAWN_INTERVAL);
 
-                const newMob = {
-                    id: nextMobId++,
-                    x: spawnGx * BLOCK_SIZE,
-                    y: spawnGy * BLOCK_SIZE,
-                    vx: 0,
-                    vy: 0,
-                    hp: 15,
-                    maxHp: 15,
-                    attackCooldown: 0,
+// ─── 20 TPS Fixed Server Tick Loop ───────────────────────────────────────────
+const SERVER_TICK_RATE = 20; // 20 Ticks per second (50ms)
+setInterval(() => {
+    // Keep local mobs reference in sync with mobManager state
+    mobs = mobManager.getMobs();
+}, 1000 / SERVER_TICK_RATE);
                     facingRight: true
                 };
                 mobs.push(newMob);
@@ -724,41 +687,8 @@ io.on('connection', (socket) => {
     console.log(`[+] Player connected: ${socket.id}`);
     const username = sanitizeUsername(socket.handshake.auth?.username);
 
-    const starterInventory = {
-        [BLOCKS.DIRT]: 20,
-        [BLOCKS.GRASS]: 10,
-        [BLOCKS.STONE]: 15,
-        [BLOCKS.WOOD]: 10,
-        [BLOCKS.LEAVES]: 10,
-        [BLOCKS.GLASS]: 5,
-        [BLOCKS.LAVA]: 5,
-        [BLOCKS.ICE]: 5,
-        [BLOCKS.SPIKE]: 8,
-        [BLOCKS.DOOR]: 4 // Provide doors to test Door Warp!
-    };
+    const player = playerManager.addPlayer(socket.id, socket.handshake.auth?.username, BLOCKS, OBJECTIVE_IDS);
 
-    players[socket.id] = {
-        id: socket.id,
-        username,
-        x: 10 * BLOCK_SIZE,
-        y: 15 * BLOCK_SIZE,
-        vx: 0,
-        color: '#' + Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0'),
-        isAdmin: false,
-        canFly: false,
-        noclip: false,
-        hp: MAX_HP,
-        lastDamageTime: 0,
-        lastMoveAt: Date.now(),
-        inventory: starterInventory,
-        objectives: {
-            [OBJECTIVE_IDS.BUILD_SHELTER]: false,
-            [OBJECTIVE_IDS.SURVIVE_NIGHT]: false
-        },
-        visibleChunks: new Set() // Track loaded chunks for this player
-    };
-
-    const player = players[socket.id];
     const playerGridX = Math.floor(player.x / BLOCK_SIZE);
     const playerGridY = Math.floor(player.y / BLOCK_SIZE);
     const visibleChunks = chunkManager.getVisibleChunks(playerGridX, playerGridY, 1024, 768);
@@ -785,7 +715,7 @@ io.on('connection', (socket) => {
         CHUNK_SIZE,
         MAX_HP,
         MAX_BUILD_RANGE,
-        inventory: starterInventory,
+        inventory: player.inventory,
         gameTime: gameTime,
         isNight: gameTime >= 60
     });
@@ -809,6 +739,13 @@ io.on('connection', (socket) => {
         if (x < 0 || x > WORLD_WIDTH * BLOCK_SIZE - BLOCK_SIZE ||
             y < 0 || y > WORLD_HEIGHT * BLOCK_SIZE - BLOCK_SIZE) return;
 
+        // Server-Authoritative Solid Collision Validation (unless fly or noclip)
+        if (!p.isAdmin && !p.noclip && !p.canFly) {
+            if (Validator.isCollidingWithSolid(x, y, BLOCK_SIZE * 0.8, BLOCK_SIZE * 0.9, getBlock)) {
+                return;
+            }
+        }
+
         const now = Date.now();
         const elapsed = Math.min(now - p.lastMoveAt, 250);
         const maxDistance = MOVE_DISTANCE_TOLERANCE + (MAX_PLAYER_SPEED * elapsed / 1000);
@@ -823,38 +760,15 @@ io.on('connection', (socket) => {
         const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
         emitToChunkNeighbors('player_moved', p, pcx, pcy, 1);
 
-        // Check if player moved to different chunks and send new chunks
-        const playerGridX = Math.floor(p.x / BLOCK_SIZE);
-        const playerGridY = Math.floor(p.y / BLOCK_SIZE);
-        const visibleChunks = chunkManager.getVisibleChunks(playerGridX, playerGridY, 1024, 768);
-        const newChunkKeys = new Set();
-        const newChunks = [];
-
-        for (const chunk of visibleChunks) {
-            const key = `${chunk.chunkX},${chunk.chunkY}`;
-            newChunkKeys.add(key);
-            
-            if (!p.visibleChunks.has(key)) {
-                newChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'foreground'));
-                newChunks.push(chunkManager.serializeChunk(chunk.chunkX, chunk.chunkY, 'background'));
-            }
-        }
-
-        // Join newly visible chunk rooms and leave ones no longer visible
-        const toJoin = [...newChunkKeys].filter(k => !p.visibleChunks.has(k));
-        const toLeave = [...p.visibleChunks].filter(k => !newChunkKeys.has(k));
-        for (const k of toJoin) socket.join(`chunk:${k}`);
-        for (const k of toLeave) socket.leave(`chunk:${k}`);
-
-        if (newChunks.length > 0) {
+        const { newChunks } = playerManager.updatePlayerChunkVisibility(socket, p);
+        if (newChunks && newChunks.length > 0) {
             socket.emit('chunks_loaded', { chunks: newChunks });
         }
-        
-        p.visibleChunks = newChunkKeys;
     });
 
     // 🚪 Door Warp Teleportation Logic
     socket.on('enter_door', () => {
+        if (!doorLimiter(socket.id)) return; // rate limit: 3/s
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
 
@@ -887,9 +801,9 @@ io.on('connection', (socket) => {
 
             io.to(socket.id).emit('respawn', { x: p.x, y: p.y, hp: p.hp });
             // Emit player_moved via chunk rooms
-        const pcx = Math.floor((Math.floor(p.x / BLOCK_SIZE)) / CHUNK_SIZE);
-        const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
-        emitToChunkNeighbors('player_moved', p, pcx, pcy, 1);
+            const pcx = Math.floor((Math.floor(p.x / BLOCK_SIZE)) / CHUNK_SIZE);
+            const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
+            emitToChunkNeighbors('player_moved', p, pcx, pcy, 1);
             socket.emit('server_message', `Warped through Door ID ${sourceDoor.pairId}.`);
         }
     });
@@ -1009,6 +923,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('drop_item', (data) => {
+        if (!dropLimiter(socket.id)) return; // rate limit: 10/s
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
         if (!data) return;
@@ -1024,6 +939,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('craft_item', (recipeId) => {
+        if (!craftLimiter(socket.id)) return; // rate limit: 5/s
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
         const recipe = RECIPES[recipeId];
@@ -1054,6 +970,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('attack_mob', (data) => {
+        if (!attackLimiter(socket.id)) return; // rate limit: 10/s
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
         if (!data) return;
@@ -1066,9 +983,7 @@ io.on('connection', (socket) => {
         const dist = Math.hypot(p.x - mob.x, p.y - mob.y);
         if (dist > 3 * BLOCK_SIZE) return;
 
-        let damage = 1;
-        if (weaponId === ITEMS.WOODEN_SWORD && p.inventory[ITEMS.WOODEN_SWORD] > 0) damage = 3;
-        if (weaponId === ITEMS.STONE_SWORD && p.inventory[ITEMS.STONE_SWORD] > 0) damage = 5;
+        const damage = combatSystem.calculateWeaponDamage(weaponId, p.inventory, ITEMS);
 
         mob.hp -= damage;
         mob.vx = (mob.x > p.x ? 1 : -1) * 5;
