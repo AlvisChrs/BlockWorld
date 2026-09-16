@@ -604,16 +604,7 @@ setInterval(() => {
     // Keep local mobs reference in sync with mobManager state
     mobs = mobManager.getMobs();
 }, 1000 / SERVER_TICK_RATE);
-                    facingRight: true
-                };
-                mobs.push(newMob);
-                const mcx = Math.floor((Math.floor(newMob.x / BLOCK_SIZE)) / CHUNK_SIZE);
-                const mcy = Math.floor((Math.floor(newMob.y / BLOCK_SIZE)) / CHUNK_SIZE);
-                emitToChunkNeighbors('mob_spawned', newMob, mcx, mcy, 1);
-            }
-        }
-    }
-}, MOB_SPAWN_INTERVAL);
+
 
 // Physics worker: full physics for mobs and items (gravity, movement, collisions, pickups)
 const { Worker } = require('worker_threads');
