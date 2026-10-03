@@ -145,7 +145,6 @@ let chunkManager = null;
 const DEFAULT_VIEW_RADIUS = CHUNK_SIZE * BLOCK_SIZE * 1.5; // pixels
 function squared(v){ return v*v; }
 
-const DEBUG = process.env.DEBUG === '1';
 
 function emitToChunkNeighbors(event, payload, chunkX, chunkY, range = 1) {
     for (let dx = -range; dx <= range; dx++) {
