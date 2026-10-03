@@ -862,10 +862,10 @@ io.on('connection', (socket) => {
         if (!dropLimiter(socket.id)) return; // rate limit: 10/s
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
-        if (!data) return;
+        if (!data || typeof data !== 'object') return;
         const { itemType } = data;
 
-        if (!VALID_ITEM_IDS.has(itemType)) return;
+        if (!Number.isInteger(itemType) || !VALID_ITEM_IDS.has(itemType)) return;
 
         if (p.inventory[itemType] && p.inventory[itemType] > 0) {
             p.inventory[itemType]--;
@@ -877,7 +877,7 @@ io.on('connection', (socket) => {
     socket.on('craft_item', (recipeId) => {
         if (!craftLimiter(socket.id)) return; // rate limit: 5/s
         const p = players[socket.id];
-        if (!p || p.hp <= 0) return;
+        if (!p || p.hp <= 0 || typeof recipeId !== 'string') return;
         const recipe = RECIPES[recipeId];
         if (!recipe) return;
 
@@ -909,8 +909,10 @@ io.on('connection', (socket) => {
         if (!attackLimiter(socket.id)) return; // rate limit: 10/s
         const p = players[socket.id];
         if (!p || p.hp <= 0) return;
-        if (!data) return;
+        if (!data || typeof data !== 'object') return;
         const { mobId, weaponId } = data;
+        
+        if (!Number.isInteger(mobId) || !Number.isInteger(weaponId)) return;
 
         const mobIndex = mobs.findIndex(m => m.id === mobId);
         if (mobIndex === -1) return;
