@@ -7,7 +7,7 @@ const ChunkManager = require('./world/ChunkManager');
 
 // ─── Import Services & Modules ──────────────────────────────────────────────
 const Logger = require('./services/Logger');
-const SaveManager = require('./services/SaveManager');
+const WorldDatabase = require('./services/WorldDatabase');
 const NetworkHandler = require('./services/NetworkHandler');
 const Validator = require('./utils/Validator');
 
@@ -19,15 +19,10 @@ const CombatSystem = require('./modules/CombatSystem');
 // ─── Initialize Services ──────────────────────────────────────────────────────
 const logger = new Logger({ isDev: process.env.NODE_ENV !== 'production' });
 const DATA_DIR = path.join(__dirname, 'data');
-const WORLD_SAVE_PATH = path.join(DATA_DIR, 'world-state.json');
-
-const saveManager = new SaveManager({
-    savePath: WORLD_SAVE_PATH,
-    backupDir: path.join(DATA_DIR, 'backups'),
-    maxBackups: 5,
-    autoSaveInterval: 300000, // 5 minutes
-    logger
-});
+const dbPath = path.join(DATA_DIR, 'world.db');
+const db = new WorldDatabase(dbPath);
+let autoSaveTimer = null;
+let autoSaveIntervalTimer = null;
 
 const app = express();
 const server = http.createServer(app);
@@ -198,111 +193,50 @@ function isValidWorldGrid(candidate) {
         );
 }
 
-function splitLegacyWorldGrid(savedWorld) {
-    world = createEmptyGrid();
-    backgroundWorld = createEmptyGrid();
-
-    for (let y = 0; y < WORLD_HEIGHT; y++) {
-        for (let x = 0; x < WORLD_WIDTH; x++) {
-            const blockId = savedWorld[y][x];
-            if (BACKGROUND_BLOCK_IDS.has(blockId)) backgroundWorld[y][x] = blockId;
-            else world[y][x] = blockId;
-        }
-    }
-}
-
-function serializeDoorEndpoints() {
-    return Array.from(doorEndpoints.values());
-}
-
-function restoreDoorEndpoints(savedDoors) {
-    doorEndpoints.clear();
-    if (!Array.isArray(savedDoors)) return;
-
-    for (const door of savedDoors) {
-        if (!door || !Number.isInteger(door.x) || !Number.isInteger(door.y) || !Number.isInteger(door.pairId)) continue;
-        if (door.x < 0 || door.x >= WORLD_WIDTH || door.y < 0 || door.y >= WORLD_HEIGHT) continue;
-        if (getBlock(door.x, door.y, 'background') !== BLOCKS.DOOR) continue;
-        doorEndpoints.set(doorKey(door.x, door.y), { x: door.x, y: door.y, pairId: door.pairId });
-    }
-}
-
 function loadWorldState() {
     try {
-        if (!fs.existsSync(WORLD_SAVE_PATH)) {
+        if (!fs.existsSync(dbPath)) {
             generateNaturalWorld();
             return;
         }
 
-        const saved = JSON.parse(fs.readFileSync(WORLD_SAVE_PATH, 'utf8'));
-        if (isValidWorldGrid(saved.foregroundWorld) && isValidWorldGrid(saved.backgroundWorld)) {
-            world = saved.foregroundWorld;
-            backgroundWorld = saved.backgroundWorld;
-        } else if (isValidWorldGrid(saved.world)) {
-            splitLegacyWorldGrid(saved.world);
-        } else {
-            console.warn('[save] Invalid saved world shape. Generating a new world.');
-            generateNaturalWorld();
-            return;
+        const loaded = db.loadWorld(WORLD_WIDTH, WORLD_HEIGHT);
+        world = loaded.foregroundWorld;
+        backgroundWorld = loaded.backgroundWorld;
+
+        droppedItems = db.loadDroppedItems() || [];
+        nextItemId = db.getMeta('nextItemId') || 1;
+        gameTime = db.getMeta('gameTime') || 0;
+
+        const doors = db.loadDoorEndpoints() || [];
+        doorEndpoints.clear();
+        for (const door of doors) {
+            doorEndpoints.set(doorKey(door.x, door.y), { x: door.x, y: door.y, pairId: door.pairId });
         }
-        droppedItems = Array.isArray(saved.droppedItems) ? saved.droppedItems.filter(item =>
-            item &&
-            Number.isInteger(item.id) &&
-            VALID_ITEM_IDS.has(item.itemType) &&
-            Number.isFinite(item.x) &&
-            Number.isFinite(item.y) &&
-            Number.isInteger(item.amount) &&
-            item.amount > 0
-        ) : [];
-        nextItemId = Number.isInteger(saved.nextItemId) && saved.nextItemId > 0 ? saved.nextItemId : 1;
-        restoreDoorEndpoints(saved.doorEndpoints);
-        console.log(`[save] Loaded world state from ${WORLD_SAVE_PATH}`);
+
+        console.log(`[save] Loaded world state from SQLite`);
     } catch (err) {
-        console.error('[save] Failed to load world state. Generating a new world.', err);
+        console.error('[save] Failed to load world state. Generating new world.', err);
         generateNaturalWorld();
     }
 }
 
-let saveTimer = null;
-let saveInProgress = false;
-let savePending = false;
-
-async function saveWorldState() {
-    if (saveInProgress) {
-        savePending = true;
-        return;
-    }
-
-    saveInProgress = true;
+function saveWorldState() {
     try {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-        const payload = {
-            version: 1,
-            savedAt: new Date().toISOString(),
-            foregroundWorld: world,
-            backgroundWorld,
-            doorEndpoints: serializeDoorEndpoints(),
-            droppedItems,
-            nextItemId
-        };
-        await fs.promises.writeFile(WORLD_SAVE_PATH, JSON.stringify(payload, null, 2), 'utf8');
-        if (DEBUG) console.log('[save] world saved async');
+        db.saveWorld(world, backgroundWorld);
+        db.saveDoorEndpoints(doorEndpoints);
+        db.saveDroppedItems(droppedItems);
+        db.saveMeta('nextItemId', nextItemId);
+        db.saveMeta('gameTime', gameTime);
+        if (DEBUG) console.log('[save] world saved to SQLite');
     } catch (err) {
         console.error('[save] Failed to save world state.', err);
-    } finally {
-        saveInProgress = false;
-        if (savePending) {
-            savePending = false;
-            // schedule next save asynchronously
-            setImmediate(() => saveWorldState());
-        }
     }
 }
 
 function scheduleWorldSave() {
-    if (saveTimer) return;
-    saveTimer = setTimeout(() => {
-        saveTimer = null;
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
         saveWorldState();
     }, 1000);
 }
@@ -310,35 +244,13 @@ function scheduleWorldSave() {
 function shutdown(signal) {
     logger.info('Shutdown signal received', { signal });
     
-    // Stop auto-save timer
-    saveManager.stopAutoSave();
+    if (autoSaveIntervalTimer) clearInterval(autoSaveIntervalTimer);
     
-    // Save world state satu kali lagi sebelum exit
-    const saveResult = saveManager.save(() => ({
-        world,
-        backgroundWorld,
-        players: Object.fromEntries(
-            Object.entries(players).map(([id, p]) => [id, {
-                username: p.username,
-                x: p.x,
-                y: p.y,
-                hp: p.hp,
-                inventory: p.inventory,
-                isAdmin: p.isAdmin
-            }])
-        ),
-        droppedItems,
-        gameTime,
-        doorEndpoints: Array.from(doorEndpoints.entries())
-    }), 'shutdown');
+    saveWorldState();
+    db.close();
     
-    if (saveResult.success) {
-        logger.info('Final save completed, exiting gracefully');
-        process.exit(0);
-    } else {
-        logger.error('Final save failed, forcing exit', { error: saveResult.error });
-        process.exit(1);
-    }
+    logger.info('Final save completed, exiting gracefully');
+    process.exit(0);
 }
 
 loadWorldState();
@@ -352,23 +264,9 @@ logger.info('Chunk grid initialized', {
 });
 
 // Start auto-save
-saveManager.startAutoSave(() => ({
-    world,
-    backgroundWorld,
-    players: Object.fromEntries(
-        Object.entries(players).map(([id, p]) => [id, {
-            username: p.username,
-            x: p.x,
-            y: p.y,
-            hp: p.hp,
-            inventory: p.inventory,
-            isAdmin: p.isAdmin
-        }])
-    ),
-    droppedItems,
-    gameTime,
-    doorEndpoints: Array.from(doorEndpoints.entries())
-}));
+autoSaveIntervalTimer = setInterval(() => {
+    saveWorldState();
+}, 300000); // 5 minutes
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
