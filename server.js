@@ -180,7 +180,7 @@ function isValidWorldGrid(candidate) {
 
 function loadWorldState() {
     try {
-        if (!fs.existsSync(dbPath)) {
+        if (!fs.existsSync(dbPath) || db.isWorldEmpty()) {
             generateNaturalWorld();
             return;
         }
@@ -374,40 +374,7 @@ setInterval(() => {
     environmentManager.regenerateHealth(players, io);
 }, HP_REGEN_INTERVAL);
 
-// ─── Ticker 3: Dropped Items Physics & Auto-Pickup ────────────────────────────
-setInterval(() => {
-    for (let i = droppedItems.length - 1; i >= 0; i--) {
-        const item = droppedItems[i];
-        if (item.vy < 4) item.vy += 0.4;
-        item.y += item.vy;
-
-        const gx = Math.floor(item.x / BLOCK_SIZE);
-        const gy = Math.floor((item.y + 12) / BLOCK_SIZE);
-        if (getBlock(gx, gy) !== BLOCKS.AIR) {
-            item.y = gy * BLOCK_SIZE - 12;
-            item.vy = 0;
-        }
-
-        const now = Date.now();
-        if (now - item.spawnTime > 500) {
-            for (let id in players) {
-                const p = players[id];
-                if (p.hp <= 0) continue;
-
-                const dist = Math.hypot((p.x + BLOCK_SIZE/2) - item.x, (p.y + BLOCK_SIZE/2) - item.y);
-                if (dist < 40) {
-                    p.inventory[item.itemType] = (p.inventory[item.itemType] || 0) + item.amount;
-                    io.to(id).emit('inventory_update', p.inventory);
-                    const pcx = Math.floor((Math.floor(item.x / BLOCK_SIZE)) / CHUNK_SIZE);
-                    const pcy = Math.floor((Math.floor(item.y / BLOCK_SIZE)) / CHUNK_SIZE);
-                    emitToChunkNeighbors('item_picked_up', { itemId: item.id, playerId: id }, pcx, pcy, 1);
-                    droppedItems.splice(i, 1);
-                    break;
-                }
-            }
-        }
-    }
-}, 50);
+// ─── Ticker 3 removed (physicsWorker handles items) ─────────────────────────
 
 // ─── Ticker 4: Knight Mob Spawner (NIGHT TIME ONLY!) & AI Loop ────────────────
 setInterval(() => {
@@ -454,8 +421,11 @@ if (physicsWorker) {
         if (!msg || msg.type !== 'physics') return;
         // Apply authoritative updates from worker
         if (Array.isArray(msg.mobs)) {
-            mobs = msg.mobs;
-            mobManager.setMobs(mobs);
+            const isNight = gameTime >= 60;
+            if (isNight) {
+                mobs = msg.mobs;
+                mobManager.setMobs(mobs);
+            }
         }
         if (Array.isArray(msg.droppedItems)) {
             const workerMap = new Map(msg.droppedItems.map(i => [i.id, i]));
@@ -539,6 +509,10 @@ io.on('connection', (socket) => {
         // Subscribe socket to the chunk room for server-side area broadcasts
         socket.join(`chunk:${key}`);
     }
+
+    let tb = 0;
+    for (let c of serializedChunks) { if (c) for (let r of c.data) for (let b of r) if (b) tb++; }
+    console.log(`[INIT] Sending to ${socket.id}, total non-air blocks in visible chunks: ${tb}`);
 
     socket.emit('init', {
         id: socket.id,
@@ -637,6 +611,11 @@ io.on('connection', (socket) => {
             sendToNearbyPlayers('door_warped', { x: p.x, y: p.y }, p.x, p.y);
 
             io.to(socket.id).emit('respawn', { x: p.x, y: p.y, hp: p.hp });
+
+            const { newChunks } = playerManager.updatePlayerChunkVisibility(socket, p);
+            if (newChunks && newChunks.length > 0) {
+                socket.emit('chunks_loaded', { chunks: newChunks });
+            }
             // Emit player_moved via chunk rooms
             const pcx = Math.floor((Math.floor(p.x / BLOCK_SIZE)) / CHUNK_SIZE);
             const pcy = Math.floor((Math.floor(p.y / BLOCK_SIZE)) / CHUNK_SIZE);
@@ -921,7 +900,7 @@ io.on('connection', (socket) => {
                     }
                     player.inventory[item] = (player.inventory[item] || 0) + qty;
                     socket.emit('inventory_update', player.inventory);
-                    socket.emit('server_message', `🎁 Given ${qty}x item ID ${item}`);
+                    socket.emit('server_message', `🎁 Given ${qty}x item(s)`);
                 } else if (!player.isAdmin) { socket.emit('server_message', '❌ Admin only.'); }
                 return;
             }
