@@ -123,7 +123,7 @@ class WorldDatabase {
         // dropped_items
         this._stmtDeleteAllItems = this.db.prepare(`DELETE FROM dropped_items`);
         this._stmtInsertItem = this.db.prepare(`
-            INSERT INTO dropped_items (id, item_type, x, y, vy, amount, spawn_time)
+            INSERT OR REPLACE INTO dropped_items (id, item_type, x, y, vy, amount, spawn_time)
             VALUES (@id, @itemType, @x, @y, @vy, @amount, @spawnTime)
         `);
         this._stmtSelectAllItems = this.db.prepare(`
