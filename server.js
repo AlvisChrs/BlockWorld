@@ -437,14 +437,21 @@ setInterval(() => {
             const mcy = Math.floor((Math.floor(newMob.y / BLOCK_SIZE)) / CHUNK_SIZE);
             emitToChunkNeighbors('mob_spawned', newMob, mcx, mcy, 1);
         }
+    } else {
+        // Despawn mobs during daytime
+        if (mobManager.getMobs().length > 0) {
+            mobManager.clearMobs();
+            mobs = [];
+            io.emit('mobs_cleared'); // tell clients to remove all mobs
+        }
     }
 }, MOB_SPAWN_INTERVAL);
 
 // ─── 20 TPS Fixed Server Tick Loop ───────────────────────────────────────────
 const SERVER_TICK_RATE = 20; // 20 Ticks per second (50ms)
 setInterval(() => {
-    // Keep local mobs reference in sync with mobManager state
-    mobs = mobManager.getMobs();
+    // We don't overwrite mobs with mobManager.getMobs() here anymore!
+    // Instead, physicsWorker is authoritative for movement.
 }, 1000 / SERVER_TICK_RATE);
 
 
@@ -463,8 +470,21 @@ if (physicsWorker) {
     physicsWorker.on('message', (msg) => {
         if (!msg || msg.type !== 'physics') return;
         // Apply authoritative updates from worker
-        if (Array.isArray(msg.mobs)) mobs = msg.mobs;
-        if (Array.isArray(msg.droppedItems)) droppedItems = msg.droppedItems;
+        if (Array.isArray(msg.mobs)) {
+            mobs = msg.mobs;
+            mobManager.setMobs(mobs);
+        }
+        if (Array.isArray(msg.droppedItems)) {
+            const workerMap = new Map(msg.droppedItems.map(i => [i.id, i]));
+            for (const item of droppedItems) {
+                const wItem = workerMap.get(item.id);
+                if (wItem) {
+                    item.x = wItem.x;
+                    item.y = wItem.y;
+                    item.vy = wItem.vy;
+                }
+            }
+        }
 
         // Process events emitted by worker
         for (const ev of msg.events || []) {
@@ -474,6 +494,10 @@ if (physicsWorker) {
                 if (player) {
                     player.inventory[ev.itemType] = (player.inventory[ev.itemType] || 0) + ev.amount;
                     io.to(ev.playerId).emit('inventory_update', player.inventory);
+
+                    const idx = droppedItems.findIndex(i => i.id === ev.itemId);
+                    if (idx !== -1) droppedItems.splice(idx, 1);
+
                     const pcx = Math.floor((Math.floor(ev.x / BLOCK_SIZE)) / CHUNK_SIZE);
                     const pcy = Math.floor((Math.floor(ev.y / BLOCK_SIZE)) / CHUNK_SIZE);
                     emitToChunkNeighbors('item_picked_up', { itemId: ev.itemId, playerId: ev.playerId }, pcx, pcy, 1);
