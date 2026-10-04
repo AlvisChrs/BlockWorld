@@ -741,7 +741,8 @@ io.on('connection', (socket) => {
 
             if (!p.isAdmin) {
                 if (!p.inventory[blockId] || p.inventory[blockId] <= 0) {
-                    fail(socket, `You do not have any ${blockId} left.`);
+                    const blockName = Object.keys(BLOCKS).find(k => BLOCKS[k] === blockId) || 'Item';
+                    fail(socket, `You do not have any ${blockName} left.`);
                     return;
                 }
             }
