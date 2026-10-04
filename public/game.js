@@ -227,7 +227,7 @@ function renderInventoryTab(tabName) {
                 hotbar[activeSlotIndex] = blockId;
                 selectedBlockId = blockId;
                 renderHotbar();
-                showAction(`Assigned ${BLOCK_NAMES[blockId]} to slot ${activeSlotIndex + 1}`, 1500);
+                showAction(`Assigned ${BLOCK_NAMES[blockId] || 'Item'} to slot ${activeSlotIndex + 1}`, 1500);
             };
             content.appendChild(div);
         });
