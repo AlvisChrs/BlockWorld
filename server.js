@@ -165,21 +165,7 @@ function sendToNearbyPlayers(event, payload, x, y, radius = DEFAULT_VIEW_RADIUS)
 }
 
 function sendMobsUpdateNearby() {
-    // Group mobs by chunk and emit the list to each chunk room
-    const groups = new Map();
-    for (const m of mobs) {
-        const gx = Math.floor((m.x + 16) / BLOCK_SIZE);
-        const gy = Math.floor((m.y + 32) / BLOCK_SIZE);
-        const chunkX = Math.floor(gx / CHUNK_SIZE);
-        const chunkY = Math.floor(gy / CHUNK_SIZE);
-        const key = `${chunkX},${chunkY}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(m);
-    }
-
-    for (const [key, list] of groups) {
-        io.to(`chunk:${key}`).emit('mobs_update', list);
-    }
+    io.emit('mobs_update', mobs);
 }
 
 function isValidWorldGrid(candidate) {
@@ -346,10 +332,7 @@ function spawnDroppedItem(itemType, pixelX, pixelY, amount = 1) {
         spawnTime: Date.now()
     };
     droppedItems.push(item);
-    // emit to the chunk room where item spawned
-    const pcx = Math.floor((Math.floor(item.x / BLOCK_SIZE)) / CHUNK_SIZE);
-    const pcy = Math.floor((Math.floor(item.y / BLOCK_SIZE)) / CHUNK_SIZE);
-    emitToChunkNeighbors('item_spawned', item, pcx, pcy, 1);
+    io.emit('item_spawned', item);
     scheduleWorldSave();
 }
 
@@ -497,10 +480,7 @@ if (physicsWorker) {
 
                     const idx = droppedItems.findIndex(i => i.id === ev.itemId);
                     if (idx !== -1) droppedItems.splice(idx, 1);
-
-                    const pcx = Math.floor((Math.floor(ev.x / BLOCK_SIZE)) / CHUNK_SIZE);
-                    const pcy = Math.floor((Math.floor(ev.y / BLOCK_SIZE)) / CHUNK_SIZE);
-                    emitToChunkNeighbors('item_picked_up', { itemId: ev.itemId, playerId: ev.playerId }, pcx, pcy, 1);
+                    io.emit('item_picked_up', { itemId: ev.itemId, playerId: ev.playerId });
                 }
             } else if (ev.type === 'mob_attack') {
                 const target = players[ev.targetId];

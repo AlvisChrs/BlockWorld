@@ -87,7 +87,7 @@ setInterval(() => {
             if (d < minD) { minD = d; closest = Object.assign({}, p); }
         }
 
-        if (closest && minD < 12 * BLOCK_SIZE) {
+        if (closest && minD < 40 * BLOCK_SIZE) {
             mob.vx = closest.x > mob.x + 8 ? 2.5 : (closest.x < mob.x - 8 ? -2.5 : 0);
             if (minD < 42 && mob.attackCooldown <= 0) {
                 mob.attackCooldown = 30;

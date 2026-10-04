@@ -462,6 +462,12 @@ socket.on('mob_died', data => {
 });
 
 socket.on('door_warped', data => {
+    if (players[myId]) {
+        players[myId].x = data.x;
+        players[myId].y = data.y;
+        playerVelocityX = 0;
+        playerVelocityY = 0;
+    }
     spawnPortalWarpParticles(data.x, data.y);
 });
 
