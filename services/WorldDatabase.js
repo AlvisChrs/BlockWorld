@@ -100,6 +100,9 @@ class WorldDatabase {
         this._stmtSelectAllBlocks = this.db.prepare(`
             SELECT x, y, layer, block_id FROM world_blocks
         `);
+        this._stmtCountBlocks = this.db.prepare(`
+            SELECT COUNT(*) AS count FROM world_blocks
+        `);
 
         // world_meta
         this._stmtUpsertMeta = this.db.prepare(`
@@ -167,6 +170,15 @@ class WorldDatabase {
         });
 
         insertAll();
+    }
+
+    /**
+     * Check if the database has any world blocks
+     * @returns {boolean}
+     */
+    isWorldEmpty() {
+        const row = this._stmtCountBlocks.get();
+        return !row || row.count === 0;
     }
 
     /**
