@@ -450,6 +450,7 @@ socket.on('item_picked_up', data => {
 });
 
 socket.on('mobs_update', updatedMobs => { mobs = updatedMobs; });
+socket.on('items_update', updatedItems => { droppedItems = updatedItems; });
 socket.on('mobs_cleared', () => { mobs = []; });
 socket.on('mob_spawned', mob => { mobs.push(mob); });
 socket.on('mob_damaged', data => {

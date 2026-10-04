@@ -166,6 +166,7 @@ function sendToNearbyPlayers(event, payload, x, y, radius = DEFAULT_VIEW_RADIUS)
 
 function sendMobsUpdateNearby() {
     io.emit('mobs_update', mobs);
+    io.emit('items_update', droppedItems);
 }
 
 function isValidWorldGrid(candidate) {
